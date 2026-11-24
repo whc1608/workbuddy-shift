@@ -160,7 +160,7 @@ export function AccountUsageShare({
                         </div>
                         <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
                           <div
-                            className="h-full rounded-full bg-primary/75"
+                            className="h-full rounded-full bg-emerald-500/75"
                             style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }}
                           />
                         </div>

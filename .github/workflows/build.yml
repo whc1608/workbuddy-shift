@@ -274,9 +274,10 @@ jobs:
                 exit 1
                 ;;
             esac
-            test -f "$SETUP_MATCHES.sig"
             cp "$SETUP_MATCHES" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe"
-            cp "$SETUP_MATCHES.sig" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe.sig"
+            if [ -f "$SETUP_MATCHES.sig" ]; then
+              cp "$SETUP_MATCHES.sig" "dist-bin/workbuddy-shift_${VER}_x64-setup.exe.sig"
+            fi
           fi
           # updater 用的签名副本由下一步按 UPDATE_ARCHIVE_NAME 生成；这里只放用户直接下载的安装包。
           # Linux 的 deb/AppImage 由下方 updater 步骤按统一资产名复制，
@@ -380,20 +381,24 @@ jobs:
               exit 1
             fi
           fi
-          if [ ! -f "$ARCHIVE" ] || [ ! -f "$ARCHIVE.sig" ]; then
-            echo "error: missing signed updater archive ($ARCHIVE)" >&2
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "error: missing updater archive ($ARCHIVE)" >&2
             exit 1
           fi
-          if [ "$(basename "$ARCHIVE")" = "$UPDATE_ARCHIVE_NAME" ] && [ -f "dist-bin/$UPDATE_ARCHIVE_NAME" ]; then
-            echo "updater 资产已由用户安装包步骤就位：$UPDATE_ARCHIVE_NAME"
+          if [ -f "$ARCHIVE.sig" ]; then
+            if [ "$(basename "$ARCHIVE")" = "$UPDATE_ARCHIVE_NAME" ] && [ -f "dist-bin/$UPDATE_ARCHIVE_NAME" ]; then
+              echo "updater 资产已由用户安装包步骤就位：$UPDATE_ARCHIVE_NAME"
+            else
+              cp "$ARCHIVE" "dist-bin/$UPDATE_ARCHIVE_NAME"
+            fi
+            cp "$ARCHIVE.sig" "dist-bin/$UPDATE_ARCHIVE_NAME.sig"
+            UPDATE_VERSION="$VER" sh scripts/gen-update-json.sh
+            MANIFEST="$BUNDLE_DIR/latest-${UPDATE_OS}-${UPDATE_ARCH}.json"
+            test -f "$MANIFEST"
+            cp "$MANIFEST" dist-bin/
           else
-            cp "$ARCHIVE" "dist-bin/$UPDATE_ARCHIVE_NAME"
+            echo "unsigned fork build: skip updater manifest ($ARCHIVE)"
           fi
-          cp "$ARCHIVE.sig" "dist-bin/$UPDATE_ARCHIVE_NAME.sig"
-          UPDATE_VERSION="$VER" sh scripts/gen-update-json.sh
-          MANIFEST="$BUNDLE_DIR/latest-${UPDATE_OS}-${UPDATE_ARCH}.json"
-          test -f "$MANIFEST"
-          cp "$MANIFEST" dist-bin/
 
       - uses: actions/upload-artifact@v4
         if: vars.PUBLISH_APP != 'false'
