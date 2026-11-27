@@ -1,0 +1,54 @@
+name: fork-build
+
+# 本分支自用的 Windows 打包流程（不签名、不发 Release、不 publish npm）。
+# 上游 build.yml 在 fork 中未被 GitHub 注册，因此单独放一份最小可用的。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["custom/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  win-x64:
+    runs-on: windows-latest
+    env:
+      AGENT_COMPANION_TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          rustflags: ""
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build NSIS installer
+        run: pnpm run tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

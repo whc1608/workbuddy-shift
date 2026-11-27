@@ -36,7 +36,7 @@ function barTone(resource: CreditResource): string {
 }
 
 /** 列宽固定：名称自适应，其余五列定宽（资源包 / 获取 / 到期 / 已用 / 剩余 / 占比）。 */
-const GRID_COLUMNS = "grid-cols-[minmax(0,1fr)_52px_52px_64px_104px_64px]";
+const GRID_COLUMNS = "grid grid-cols-[minmax(0,1fr)_52px_52px_64px_104px_64px]";
 
 export function ResourceBreakdown({
   credit,
