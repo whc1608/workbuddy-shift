@@ -120,7 +120,7 @@ export function AccountCreditSection({ account, compact, credit, creditLoading, 
                       </div>
                     </div>
                     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                      <div className={cn("h-full rounded-full", resource.expired ? "bg-red-600/60 dark:bg-red-400/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-[var(--data-series-blue)]")} style={{ width: `${ratio}%` }} />
+                      <div className={cn("h-full rounded-full", resource.expired ? "bg-red-600/60 dark:bg-red-400/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-emerald-500/75")} style={{ width: `${ratio}%` }} />
                     </div>
                   </div>
                 );
@@ -158,13 +158,12 @@ export function CreditResourceRow({ resource, compact, placeholderLabel }: { res
   const expiryText = resource ? formatCreditExpiry(resource.expireAt) : "\u00a0";
   const expiryTitle = resource?.expireAt ? `${expiryText} 到期` : expiryText;
   const ratio = resource && resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
-  // 三态与「全部积分包」弹窗保持一致：已过期红 / 即将过期橙 / 其它用主题数据蓝
-  // （蓝是「正常可用」的中性状态色；绿已从数据色板移除，见 docs 里的配色约定）。
+  // 三态：已过期红 / 即将过期橙 / 正常绿。
   const barTone = resource?.expired
     ? "bg-red-600/60 dark:bg-red-400/60"
     : resource?.expiringSoon
       ? "bg-orange-500"
-      : "bg-[var(--data-series-blue)]";
+      : "bg-emerald-500/75";
   const title = resource ? `${name} · 剩余 ${formatAmount(resource.remaining)} / ${formatAmount(resource.total)} · ${expiryTitle}` : undefined;
   return (
     <div className={cn("min-w-0", placeholder && "invisible")} aria-hidden={placeholder || undefined} title={title}>

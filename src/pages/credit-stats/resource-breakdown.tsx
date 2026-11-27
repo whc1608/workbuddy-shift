@@ -27,12 +27,12 @@ function shortExpiry(expireAt: number | null): string {
 /** 未使用（剩余 === 总量）时的中性色：灰 = 还没动过，不是「已用完」。 */
 const UNUSED_BAR = "bg-muted-foreground/35";
 
-/** 迷你条的配色：过期红 / 临期橙（已登记的例外）> 未使用灰 > 用过的主题蓝。 */
+/** 迷你条的配色：过期红 / 临期橙 > 未使用灰 > 正常绿。 */
 function barTone(resource: CreditResource): string {
   if (resource.expired) return "bg-red-600/60 dark:bg-red-400/60";
   if (resource.expiringSoon) return "bg-orange-500/80";
   if (resource.used <= 0) return UNUSED_BAR;
-  return "bg-[var(--data-series-blue)]";
+  return "bg-emerald-500/75";
 }
 
 /** 列宽固定：名称自适应，其余五列定宽（资源包 / 获取 / 到期 / 已用 / 剩余 / 占比）。 */
