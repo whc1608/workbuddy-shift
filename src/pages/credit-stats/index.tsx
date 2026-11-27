@@ -869,8 +869,12 @@ export default function CreditStatsPage() {
                 range={range}
               />
 
-              {/* 次要从属折叠：第一个（账号消耗构成）默认展开，其余收起 */}
-              <Accordion type="multiple" defaultValue={["account-usage"]} className="min-w-0">
+              {/* 次要从属折叠：默认全部展开，保持与旧版一致的完整信息密度 */}
+              <Accordion
+                type="multiple"
+                defaultValue={["account-usage", "models", "resources"]}
+                className="min-w-0"
+              >
                 <AccordionItem value="account-usage" className="min-w-0 border-t border-border/60">
                   <AccordionTrigger className="px-1 py-2.5 text-[13px] font-medium leading-5 text-foreground">
                     <span className="min-w-0 truncate text-left" title={accountUsageTitle}>

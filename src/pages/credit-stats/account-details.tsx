@@ -126,7 +126,6 @@ export function SelectedAccountDetails({
                 accounts={visibleAccounts}
                 creditMap={creditMap}
                 creditLoadingMap={creditLoadingMap}
-                range={range}
               />
             </div>
           ) : (
