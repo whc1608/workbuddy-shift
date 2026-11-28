@@ -44,6 +44,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # bundle 目录在 cargo 缓存里（见上面的 `target`）：不先删，上一个版本的
+      # `*-setup.exe` 会留在同一目录，被下面的 glob 一起打进 artifact——
+      # 实测 0.5.2 的产物里混进过 0.5.0 的安装包。上游 build.yml 同样在构建前清理。
+      - name: Clean previous bundle output
+        run: Remove-Item -Recurse -Force target/x86_64-pc-windows-msvc/release/bundle -ErrorAction SilentlyContinue
+        shell: pwsh
+
       - name: Build NSIS installer
         run: pnpm run tauri build --target x86_64-pc-windows-msvc --bundles nsis
 
