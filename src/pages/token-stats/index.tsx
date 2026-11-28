@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { CircleAlert, Download, FileSpreadsheet, ListTree, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -12,6 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { formatDate, formatDateTime } from "@/lib/format";
 import { usePersistedPreferenceState } from "@/lib/persisted-preference";
+import { toolEntryEnabled, useSupportedTools, type ToolId } from "@/lib/supported-tools";
 import {
   statsDateSpanDays,
   STATS_RANGE_PREFERENCE,
@@ -55,6 +57,31 @@ const SOURCE_KEYS: SourceKey[] = [
   "codebuddy-ide",
 ];
 
+/**
+ * 来源 → 设置页「支持工具」开关：关掉的客户端不再出现在来源标签里。
+ *
+ * 两个 WorkBuddy 来源（国内版 / 国际版）共用同一个开关——设置页只有一个 WorkBuddy 条目，
+ * 拆成两个键会让用户无从对应。
+ */
+const SOURCE_TOOL: Record<SourceKey, ToolId> = {
+  workbuddy: "workbuddy",
+  "workbuddy-ai": "workbuddy",
+  "codebuddy-cli": "codebuddyCli",
+  "vscode-ext": "vscodeExt",
+  jetbrains: "jetbrains",
+  "codebuddy-ide": "codebuddyIde",
+};
+
+/** 来源标签的图标与文案：顺序即标签顺序，渲染前按上面的开关过滤。 */
+const SOURCE_TABS: { key: SourceKey; label: string; mark: ReactNode }[] = [
+  { key: "workbuddy", label: "WorkBuddy", mark: <WorkBuddyMark size={16} /> },
+  { key: "workbuddy-ai", label: "WorkBuddy 国际版", mark: <WorkBuddyAiMark size={16} /> },
+  { key: "codebuddy-cli", label: "CodeBuddy CLI", mark: <CodeBuddyMark size={16} /> },
+  { key: "vscode-ext", label: "VS Code 插件", mark: <VscodeExtMark size={16} /> },
+  { key: "jetbrains", label: "JetBrains 插件", mark: <JetbrainsMark size={16} /> },
+  { key: "codebuddy-ide", label: "CodeBuddy IDE", mark: <CodeBuddyCnIdeMark size={16} /> },
+];
+
 /** 每个来源记住上次选择的账号（第 7 条：筛选层级按来源独立）。 */
 function readAllSelections(): Record<SourceKey, AccountSelection> {
   return SOURCE_KEYS.reduce(
@@ -81,6 +108,12 @@ export default function TokenStatsPage() {
    * 持久化到 localStorage，与积分统计页共用同一份。
    */
   const [range, setRange] = usePersistedPreferenceState(STATS_RANGE_PREFERENCE);
+  const enabledTools = useSupportedTools();
+  /** 允许展示的来源：设置页关掉的客户端整条去掉（统计页也不该给它留一个入口）。 */
+  const visibleSources = useMemo(
+    () => SOURCE_TABS.filter((item) => toolEntryEnabled(enabledTools, SOURCE_TOOL[item.key])),
+    [enabledTools],
+  );
 
   useEffect(() => {
     const force = reload > 0;
@@ -115,7 +148,11 @@ export default function TokenStatsPage() {
 
   useEffect(() => {
     if (!stats || stats.sources.length === 0) return;
-    const available = stats.sources.map((item) => item.source);
+    // 只考虑「有数据且没被设置页关掉」的来源：否则会切到一个不存在的标签上。
+    const available = stats.sources
+      .map((item) => item.source)
+      .filter((key) => visibleSources.some((item) => item.key === key));
+    if (available.length === 0) return;
     const next = available.includes(active)
       ? active
       : available.includes("workbuddy")
@@ -124,7 +161,7 @@ export default function TokenStatsPage() {
     if (!next) return;
     if (next !== active) setActive(next);
     persistPreferredTokenSource(next);
-  }, [active, stats]);
+  }, [active, stats, visibleSources]);
 
   const accounts = useAccountsStore((state) => state.accounts);
   const fetchAccounts = useAccountsStore((state) => state.fetchAll);
@@ -307,6 +344,12 @@ export default function TokenStatsPage() {
       {/* 数据源 Tab 独占一行：数据源变多时不与右上角操作挤在同一排 */}
       {loading && !stats ? (
         <Skeleton className="mb-8 h-9 w-full max-w-md rounded-lg" aria-hidden="true" />
+      ) : visibleSources.length === 0 ? (
+        <div className="mb-8 rounded-xl border border-dashed border-border px-6 py-10 text-center">
+          <p className="text-sm font-medium">未启用任何客户端</p>
+          <p className="mt-2 text-sm text-muted-foreground">在「设置 → 支持工具」里开启客户端后，这里会显示它对应的 Token 统计。</p>
+          <Button asChild variant="outline" size="sm" className="mt-4"><Link to="/settings">去设置</Link></Button>
+        </div>
       ) : (
         <div className="mb-8 flex min-w-0 flex-wrap items-center justify-between gap-3">
           <Tabs
@@ -319,54 +362,17 @@ export default function TokenStatsPage() {
             }}
           >
             <TabsList className="h-auto max-w-full flex-wrap" aria-label="Token 数据来源">
-              <TabsTrigger
-                className="max-w-full gap-2 whitespace-normal"
-                value="workbuddy"
-                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "workbuddy"))}
-              >
-                <WorkBuddyMark size={16} />
-                WorkBuddy
-              </TabsTrigger>
-              <TabsTrigger
-                className="max-w-full gap-2 whitespace-normal"
-                value="workbuddy-ai"
-                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "workbuddy-ai"))}
-              >
-                <WorkBuddyAiMark size={16} />
-                WorkBuddy 国际版
-              </TabsTrigger>
-              <TabsTrigger
-                className="max-w-full gap-2 whitespace-normal"
-                value="codebuddy-cli"
-                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-cli"))}
-              >
-                <CodeBuddyMark size={16} />
-                CodeBuddy CLI
-              </TabsTrigger>
-              <TabsTrigger
-                className="max-w-full gap-2 whitespace-normal"
-                value="vscode-ext"
-                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "vscode-ext"))}
-              >
-                <VscodeExtMark size={16} />
-                VS Code 插件
-              </TabsTrigger>
-              <TabsTrigger
-                className="max-w-full gap-2 whitespace-normal"
-                value="jetbrains"
-                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "jetbrains"))}
-              >
-                <JetbrainsMark size={16} />
-                JetBrains 插件
-              </TabsTrigger>
-              <TabsTrigger
-                className="max-w-full gap-2 whitespace-normal"
-                value="codebuddy-ide"
-                disabled={Boolean(stats && !stats.sources.some((item) => item.source === "codebuddy-ide"))}
-              >
-                <CodeBuddyCnIdeMark size={16} />
-                CodeBuddy IDE
-              </TabsTrigger>
+              {visibleSources.map((item) => (
+                <TabsTrigger
+                  key={item.key}
+                  className="max-w-full gap-2 whitespace-normal"
+                  value={item.key}
+                  disabled={Boolean(stats && !stats.sources.some((entry) => entry.source === item.key))}
+                >
+                  {item.mark}
+                  {item.label}
+                </TabsTrigger>
+              ))}
             </TabsList>
           </Tabs>
           {hasAccountDimension(source) ? (

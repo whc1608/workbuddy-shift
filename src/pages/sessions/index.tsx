@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ChevronLeft,
   ChevronRight,
@@ -27,7 +28,8 @@ import type { SessionGroupClient, WbVariant } from "@/lib/types";
 import * as api from "@/lib/api";
 import { useAccountsStore } from "@/stores/accounts";
 import { AddLinkedSessionDialog } from "./add-linked-session-dialog";
-import { CLIENTS, PAGE_SIZE } from "./constants";
+import { PAGE_SIZE, visibleClients, type SessionClientEntry } from "./constants";
+import { useSupportedTools } from "@/lib/supported-tools";
 import { ScanProgressHint } from "@/components/scan-progress-hint";
 
 import { ClientMark, GroupSkeleton, ProjectSection, SessionGroupCard } from "./group-list";
@@ -45,8 +47,35 @@ function timeOfDay(timestamp: number): string {
 }
 
 export default function SessionsPage() {
+  const enabledTools = useSupportedTools();
+  const clients = visibleClients(enabledTools);
+  // 全部关闭时不挂载页面主体：主体一挂载就会拉会话组（大库几十秒），
+  // 这些工具都被关掉了，没必要为一个看不见的列表付这份代价。
+  if (clients.length === 0) return <NoEnabledClients />;
+  return <SessionsPageContent clients={clients} />;
+}
+
+function NoEnabledClients() {
+  return (
+    <div className="mx-auto w-full max-w-[1180px] min-w-0 px-6 py-8 sm:px-8 sm:py-9">
+      <header className="mb-6">
+        <h1 className="text-[28px] font-semibold tracking-tight">关联会话</h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">统一管理各账号下的会话副本，按需复制或同步。</p>
+      </header>
+      <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center">
+        <p className="text-sm font-medium">未启用任何客户端</p>
+        <p className="mt-2 text-sm text-muted-foreground">在「设置 → 支持工具」里开启至少一个客户端后，这里会显示它对应的关联会话。</p>
+        <Button asChild variant="outline" size="sm" className="mt-4"><Link to="/settings">去设置</Link></Button>
+      </div>
+    </div>
+  );
+}
+
+function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
   const { accounts, fetchAll } = useAccountsStore();
-  const [client, setClient] = useState<SessionGroupClient>("workbuddy");
+  const [clientChoice, setClientChoice] = useState<SessionGroupClient>(clients[0].id);
+  // 选中的客户端被关掉时回退到第一个仍启用的，避免留下一个不在标签列表里的选中项。
+  const client = clients.some((item) => item.id === clientChoice) ? clientChoice : clients[0].id;
   const [variantScope, setVariantScope] = useState<WbVariant>("cn");
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -126,7 +155,7 @@ export default function SessionsPage() {
 
   function changeClient(value: string) {
     const next = value as SessionGroupClient;
-    setClient(next);
+    setClientChoice(next);
     setDetailOpen(false);
     setSelectedGroupId(null);
     setRebuildPrefill(null);
@@ -210,7 +239,7 @@ export default function SessionsPage() {
           </div>
           <Tabs value={client} onValueChange={changeClient} className="mt-4">
             <TabsList aria-label="会话客户端" className="grid h-auto w-full grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2 bg-transparent p-0">
-              {CLIENTS.map((item) => <TabsTrigger key={item.id} value={item.id} className="relative h-auto min-w-0 justify-start gap-3 rounded-lg border border-border bg-background px-3 py-4 text-left hover:border-brand/50 data-[state=active]:border-brand data-[state=active]:bg-brand/5 data-[state=active]:shadow-sm">
+              {clients.map((item) => <TabsTrigger key={item.id} value={item.id} className="relative h-auto min-w-0 justify-start gap-3 rounded-lg border border-border bg-background px-3 py-4 text-left hover:border-brand/50 data-[state=active]:border-brand data-[state=active]:bg-brand/5 data-[state=active]:shadow-sm">
                 <ClientMark client={item.id} />
                 <span className="min-w-0"><span className="block truncate text-sm font-semibold text-foreground">{item.title}</span><span className="mt-1 block truncate text-xs font-normal text-muted-foreground">{item.id === "workbuddy" ? "国内版 · 国际版" : item.id === "codebuddyIde" ? "国内版 / 国际版" : item.id === "jetbrains" ? "IDEA / PyCharm" : "VS Code"}</span></span>
                 {client === item.id && <CheckCircle2 className="absolute right-2 top-2 size-3.5 text-brand" />}
@@ -220,7 +249,7 @@ export default function SessionsPage() {
         </header>
         <section aria-labelledby="session-groups-title" className="min-w-0">
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            <h2 id="session-groups-title" className="text-base font-semibold tracking-tight">{CLIENTS.find((item) => item.id === client)?.title} 会话</h2>
+            <h2 id="session-groups-title" className="text-base font-semibold tracking-tight">{clients.find((item) => item.id === client)?.title} 会话</h2>
             <Badge variant="secondary" className="h-6 min-w-6 rounded-full border-0 px-1.5 text-[11px] tabular-nums text-muted-foreground shadow-none" aria-label={`${list.groups.length} 个会话组`}>{list.groups.length}</Badge>
           </div>
           <div className="my-4 flex flex-wrap items-center justify-between gap-2">

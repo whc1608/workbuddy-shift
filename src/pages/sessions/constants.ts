@@ -1,5 +1,6 @@
 
 
+import { toolEntryEnabled, type ToolId } from "@/lib/supported-tools";
 import type {
   SessionGroupClient,
   SessionGroupSummary,
@@ -21,12 +22,27 @@ export const PAGINATION_HIDE_MAX = 4;
  */
 export const PROJECT_SECTIONS_PER_PAGE = 4;
 
-export const CLIENTS: { id: SessionGroupClient; title: string; description: string }[] = [
+export type SessionClientEntry = { id: SessionGroupClient; title: string; description: string };
+
+export const CLIENTS: SessionClientEntry[] = [
   { id: "workbuddy", title: "WorkBuddy", description: "含国内版与国际版会话" },
   { id: "vscodeExt", title: "CodeBuddy 插件", description: "VS Code 扩展会话" },
   { id: "codebuddyIde", title: "CodeBuddy IDE", description: "国内版 / 国际版独立分组" },
   { id: "jetbrains", title: "JetBrains 插件", description: "IDEA / PyCharm 共用" },
 ];
+
+/**
+ * 页头可切换的客户端：与设置页「支持工具」开关同步。
+ *
+ * 关掉某工具就等于「它不存在」——这里不能再列出它的标签页，否则用户会看到一个
+ * 已声明的关闭项，还会为它拉一遍会话组（大库上一次要几十秒）。全部关闭时返回空数组，
+ * 由页面显示「未启用任何客户端」的空态，而不是硬塞一个默认客户端。
+ */
+export function visibleClients(
+  enabledTools: Partial<Record<ToolId, boolean>> | undefined,
+): SessionClientEntry[] {
+  return CLIENTS.filter((item) => toolEntryEnabled(enabledTools, item.id));
+}
 
 type GroupListSnapshot = {
   groups: SessionGroupSummary[];

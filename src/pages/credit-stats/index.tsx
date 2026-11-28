@@ -51,6 +51,7 @@ import type {
 } from "@/lib/types";
 
 import { accountVariant } from "@/lib/variant";
+import { toolEntryEnabled, useSupportedTools, type ToolId } from "@/lib/supported-tools";
 import { useAccountsStore } from "@/stores/accounts";
 import { SelectedAccountDetails } from "./account-details";
 import {
@@ -105,6 +106,20 @@ const STATISTICS_AUTO_REFRESH_MS = 30 * 60 * 1000;
 function rangeFileLabel(range: StatsRangeKey): string {
   return statsRangeLabel(range).replace(/\s+/g, "");
 }
+
+/**
+ * 客户端筛选键 → 设置页「支持工具」开关。
+ *
+ * 「全部 / 未知」不属于任何客户端，永远保留：未知是数据里 `client` 缺失的行，
+ * 跟开关无关，去掉会让「全部」与各客户端条目之和对不上。
+ */
+const CLIENT_TOOL: Partial<Record<CreditClientKey, ToolId>> = {
+  workbuddy: "workbuddy",
+  vscode: "vscodeExt",
+  jetbrains: "jetbrains",
+  ide: "codebuddyIde",
+  cli: "codebuddyCli",
+};
 
 
 export default function CreditStatsPage() {
@@ -393,13 +408,18 @@ export default function CreditStatsPage() {
   }, [stats, viewVariant, variantAccountIds]);
 
   // 客户端维度只能在明细上做（官方没有按客户端聚合）。
-  const clientOptions = useMemo(
-    () =>
+  const enabledTools = useSupportedTools();
+  const clientOptions = useMemo(() => {
+    const options =
       dataRange === "all"
         ? ledgerClientViewOptions(stats?.ledger)
-        : clientViewOptions(stats?.officialUsage?.requests),
-    [dataRange, stats],
-  );
+        : clientViewOptions(stats?.officialUsage?.requests);
+    // 设置页关掉的客户端不再列出：与关联会话 / Token 统计同一条规则（未知项始终保留）。
+    return options.filter((option) => {
+      const tool = CLIENT_TOOL[option.key];
+      return tool === undefined || toolEntryEnabled(enabledTools, tool);
+    });
+  }, [dataRange, stats, enabledTools]);
   useEffect(() => {
     // 明细里没有该客户端（换账号、后端换了明细范围）→ 回到「全部」，不留一个空筛选项。
     if (clientView === "all") return;
