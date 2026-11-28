@@ -45,6 +45,7 @@ import { TokenAccountSelect } from "./account-select";
 import { Dashboard } from "./dashboard";
 import { buildTokenStatsCsv, buildTokenStatsXlsx, tokenStatsFileName, tokenStatsXlsxFileName } from "./export";
 import { SourceKey, isSourceKey, persistPreferredTokenSource, readPreferredTokenSource, staleLogDays } from "./data";
+import { mergeTokenSources } from "./merge-sources";
 import { RequestDetailDialog } from "./request-detail";
 import { TokenStatsLoadingSkeleton } from "./skeleton";
 
@@ -180,7 +181,21 @@ export default function TokenStatsPage() {
     if (accounts.length === 0) void fetchAccounts();
   }, [accounts.length, fetchAccounts]);
 
-  const source = stats?.sources.find((item) => item.source === active);
+  const rawSource = stats?.sources.find((item) => item.source === active);
+  /**
+   * CodeBuddy IDE 标签页取「旧 index.json 历史 ∪ CLI 日志」。
+   *
+   * 新版 IDE（2026-11-27 升级）不再写 `CodeBuddyExtension/Data/**\/history/<id>/index.json`，
+   * 改用内置 CLI 内核把会话写进 `~/.codebuddy/projects/*.jsonl`，与终端 CLI 完全同一份
+   * 目录、同一个 `agent = "cli"` 标记，本地没有任何字段能拆分（详见 `merge-sources.ts`）。
+   * 并集之后：11/26 以前来自旧索引，11/27 起来自共用日志，IDE 标签页不会再断档；
+   * 代价是两个标签页的数字有重叠，页头已注明。
+   */
+  const source = useMemo(() => {
+    if (rawSource?.source !== "codebuddy-ide") return rawSource;
+    const cli = stats?.sources.find((item) => item.source === "codebuddy-cli");
+    return cli ? mergeTokenSources(rawSource, cli) : rawSource;
+  }, [rawSource, stats]);
   /** 最后一条日志距今几天（`null` = 无覆盖信息）：达到 `STALE_HINT_DAYS` 才在页头提示。 */
   const logStaleDays = staleLogDays(source?.coverageEndAt);
   const options = useMemo(
@@ -289,6 +304,12 @@ export default function TokenStatsPage() {
                 <p className="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
                   本地日志口径（不是官方账单）：覆盖 {formatDate(source.coverageStartAt)} ~{" "}
                   {formatDate(source.coverageEndAt)} · 账号：{scopeLabel} · 逐请求明细仅 CodeBuddy CLI 提供
+                </p>
+              ) : null}
+              {active === "codebuddy-ide" ? (
+                <p className="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
+                  新版本 IDE 的会话与「CodeBuddy CLI」写在同一份本机日志里（客户端不再写旧索引），
+                  本页已合并显示：11/26 以前来自旧索引，之后来自共用日志，两处数字会有重叠。
                 </p>
               ) : null}
               {source && logStaleDays !== null && logStaleDays >= STALE_HINT_DAYS ? (
