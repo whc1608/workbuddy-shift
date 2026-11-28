@@ -117,6 +117,7 @@ mod list;
 mod paths;
 mod switch;
 
+pub(crate) use conversations::conversation_account_uids;
 pub(crate) use copy::copy_codebuddy_ide_sessions_in;
 pub use list::{
     list_codebuddy_ide_sessions, list_current_codebuddy_ide_sessions,

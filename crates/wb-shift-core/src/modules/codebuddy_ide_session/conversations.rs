@@ -231,8 +231,64 @@ pub(super) fn list_sessions_in(path: &Path, projects: Option<&Path>, uid: &str) 
     sessions
 }
 
-/// 把勾选会话在会话库里的账号归属从 `source_uid` 改到 `target_uid`。
+/// 会话 id → 归属账号 uid（只读），用于限额事件的账号归因兜底。
 ///
+/// 限流事件的 hook payload 不带账号 uid；CLI 侧原有的两条归因链（日志内鉴权 uid、
+/// `~/.codebuddy-rotate/state.json` 的 `activeAccountId`）在「用户从没用本工具切过 CLI
+/// 账号」时**都不存在**，于是 429 被整条丢弃、账号卡片不出限额标记（2026-11-28 实证：
+/// 132\*\*\*\*6560 的 DeepSeek 限额 21:00 触发，界面毫无提示）。
+///
+/// 新版 CLI / IDE 自己把归属写在 `conversations.user_id` 上，这是同一份事实的唯一真源，
+/// 因此作为**最终兜底**：前两条链都取不到时才查。返回空表（库缺失 / 无该表 / 会话不在库里）
+/// 时调用方继续丢弃事件 —— 宁可少显示，不可错归。
+///
+/// 只读打开（`SQLITE_OPEN_READ_ONLY`）+ 忙等超时：CLI 正在写库时不会因此失败或阻塞界面。
+pub(crate) fn conversation_account_uids(session_ids: &[String]) -> HashMap<String, String> {
+    match db_path() {
+        Some(path) => conversation_account_uids_in(&path, session_ids),
+        None => HashMap::new(),
+    }
+}
+
+/// 归因查询内核（库路径已解析），供单测注入临时库。
+pub(super) fn conversation_account_uids_in(
+    path: &Path,
+    session_ids: &[String],
+) -> HashMap<String, String> {
+    let ids: Vec<&String> = session_ids
+        .iter()
+        .filter(|id| is_safe_conversation_id(id))
+        .collect();
+    if ids.is_empty() || !path.is_file() {
+        return HashMap::new();
+    }
+    let Ok(conn) = open_read_only(path) else {
+        return HashMap::new();
+    };
+    if !has_conversations_table(&conn) {
+        return HashMap::new();
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("SELECT id, user_id FROM conversations WHERE id IN ({placeholders})");
+    let Ok(mut statement) = conn.prepare(&sql) else {
+        return HashMap::new();
+    };
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| *id as &dyn rusqlite::ToSql).collect();
+    let Ok(rows) = statement.query_map(params.as_slice(), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    }) else {
+        return HashMap::new();
+    };
+    rows.flatten()
+        .filter_map(|(id, uid)| {
+            let uid = uid?.trim().to_string();
+            (!uid.is_empty()).then_some((id, uid))
+        })
+        .collect()
+}
+
+/// 把勾选会话在会话库里的账号归属从 `source_uid` 改到 `target_uid`。
 /// 写前先 `VACUUM INTO` 出一份一致性备份（WAL 中的未落盘内容也会包含在内）；随后在单个
 /// 事务里改 `conversations.user_id` 与 `conversation_runtime_sources.user_id`。
 /// 正文 JSONL 是各账号共用的，不搬文件、不改 id，所以「沿用会话 id」的既有语义保持不变。

@@ -329,22 +329,38 @@ pub(super) fn attribute_cli(event: &QuotaEvent, ctx: &IngestContext, now: i64) -
     }
     // 快照查询上界 = 请求时刻：只认「该请求发出时已在运行的进程」，不会被后来接管会话的
     // 新进程顶替。配合下面的 `snap_at ≥ mtime` 判据，自动蕴含「请求发出于最后一次切换之后」。
+    //
+    // 快照取不到时不再直接丢弃：新版 CLI 的 `~/.codebuddy/sessions/*.json` 只在交互式会话
+    // 存活期间写，长时间运行的会话结束后文件可能已被清理，而会话库里的归属才是持久事实。
     let snap_at = session_snapshot_time(
         &ctx.cli_sessions_dir,
         event.session_id.as_deref(),
         request_at,
     )
-    .or_else(|| session_created_at(&event.transcript_path))?;
+    .or_else(|| session_created_at(&event.transcript_path));
+    let Some(snap_at) = snap_at else {
+        eprintln!(
+            "[cli-attribution] 进程快照与 transcript 首行都取不到，改用会话库归属兜底"
+        );
+        return cli_session_owner(event, ctx);
+    };
     if snap_at > now {
         // 时钟异常（transcript 首行时间在未来）时不猜。
         return None;
     }
-    let (current_id, mtime) = cli_state_snapshot(&ctx.cli_state_path)?;
+    let Some((current_id, mtime)) = cli_state_snapshot(&ctx.cli_state_path) else {
+        // 从没用本工具切过 CLI 账号时该文件不存在（2026-11-28 本机实证）：此时两条旧判据
+        // 全部失效，走会话库兜底，而不是把 429 整条丢掉。
+        eprintln!(
+            "[cli-attribution] 读不到 CLI 轮换状态文件，改用会话库归属兜底（事件不会被丢弃）"
+        );
+        return cli_session_owner(event, ctx);
+    };
     let Some(mtime) = mtime else {
         eprintln!(
             "[cli-attribution] 丢弃限额事件：无法读取 state.json 的写入时刻，无法判断归因是否成立"
         );
-        return None;
+        return cli_session_owner(event, ctx);
     };
     if snap_at >= mtime {
         return account_exists(&ctx.accounts, &current_id).then_some(current_id);
@@ -354,6 +370,31 @@ pub(super) fn attribute_cli(event: &QuotaEvent, ctx: &IngestContext, now: i64) -
          该 429 请求（{request_at}）发出时活进程持有的 key 与当前账号不一致（不变式被破坏）"
     );
     None
+}
+
+/// 最终兜底：用客户端自己记的会话归属（`~/.codebuddy/codebuddy.db` 的
+/// `conversations.user_id`）反查账号库。
+///
+/// 为什么这条链是可信的：归属由 CLI/IDE 自己写，且与「谁在持 key」是同一事实 —— 会话属于
+/// 哪个账号，它发出的 429 就记在哪个账号头上。前两条链（日志内鉴权 uid、轮换状态文件）
+/// 都依赖本工具介入过才存在的数据，这条不依赖。
+///
+/// 仍然守「宁可少显示，不可错归」：会话 id 缺失、库里查不到、或 uid 不在账号库里 → `None`。
+fn cli_session_owner(event: &QuotaEvent, ctx: &IngestContext) -> Option<String> {
+    let session_id = event
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let owner_uid = crate::modules::codebuddy_ide_session::conversation_account_uids(&[
+        session_id.to_string(),
+    ])
+    .remove(session_id)?;
+    let account_id = account_id_by_uid(&ctx.accounts, &owner_uid)?;
+    eprintln!(
+        "[cli-attribution] 会话 {session_id} 归属 uid {owner_uid} → 账号 {account_id}（会话库兜底）"
+    );
+    Some(account_id)
 }
 
 /// 归因：payload 不含账号 uid，只能靠客户端侧「谁在持 key」。

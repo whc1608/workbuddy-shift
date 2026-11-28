@@ -139,14 +139,34 @@ pub(crate) fn account_id_by_uid() -> HashMap<String, String> {
 /// 新来源（CLI / 两个 IDE）的账号归因。
 ///
 /// ① 事件 uid → 账号库 `uid → id`（日志内鉴权行，时态正确）；② 回落该来源状态文件的
-/// `activeAccountId`（带 `updatedAt ≤ 事件时刻` 门控）；③ 都不满足 → 丢弃该事件，
+/// `activeAccountId`（带 `updatedAt ≤ 事件时刻` 门控）；③ 两者都取不到时，用客户端自己
+/// 记的会话归属兜底（[`session_owner_account`]，见其注释）；④ 兜底也取不到 → 丢弃该事件，
 /// 不错归给任何账号。
+///
+/// 第 ③ 条不可省：CLI 的鉴权行只写在 `AuthDoInitProbe` 命中的日志里，而轮换状态文件
+/// （`~/.codebuddy-rotate/state.json`）只在**用户用本工具切过 CLI 账号**后才存在。日常
+/// 「一直用同一个账号」的机器上两条链同时为空，429 会被整条丢掉 —— 账号卡片不出限额标记，
+/// 用户只看到模型报限额（2026-11-28 本机实证）。
 pub(crate) fn resolve_by_uid(
     events: &[Event],
     uid_to_account: &HashMap<String, String>,
     fallback: &ActiveAccount,
     source: &str,
 ) -> Vec<Resolved> {
+    // 只对「前两条链都取不到」的事件查会话库：一次批量查询，不逐条开库。
+    let unresolved: Vec<String> = events
+        .iter()
+        .filter(|event| {
+            event
+                .uid
+                .as_deref()
+                .and_then(|uid| uid_to_account.get(uid))
+                .is_none()
+                && fallback.account_for(event.first_seen_at).is_none()
+        })
+        .filter_map(|event| event.session_id.clone())
+        .collect();
+    let owners = session_owner_account(&unresolved);
     events
         .iter()
         .filter_map(|event| {
@@ -155,7 +175,14 @@ pub(crate) fn resolve_by_uid(
                 .as_deref()
                 .and_then(|uid| uid_to_account.get(uid))
                 .map(String::as_str)
-                .or_else(|| fallback.account_for(event.first_seen_at))?;
+                .or_else(|| fallback.account_for(event.first_seen_at))
+                .or_else(|| {
+                    event
+                        .session_id
+                        .as_deref()
+                        .and_then(|id| owners.get(id))
+                        .map(String::as_str)
+                })?;
             Some(Resolved {
                 account_id: account_id.to_string(),
                 model: event.model.clone(),
@@ -165,5 +192,24 @@ pub(crate) fn resolve_by_uid(
                 source: source.to_string(),
             })
         })
+        .collect()
+}
+
+/// 会话 id → 账号库 id（会话库归属 + `uid → id` 映射）。
+///
+/// 归属由 CLI / IDE 自己写在 `~/.codebuddy/codebuddy.db` 的 `conversations.user_id`，与
+/// 「谁在持 key」是同一事实；这里只做一次读，库缺失或会话不在库里时返回空表。
+fn session_owner_account(session_ids: &[String]) -> HashMap<String, String> {
+    if session_ids.is_empty() {
+        return HashMap::new();
+    }
+    let owners = crate::modules::codebuddy_ide_session::conversation_account_uids(session_ids);
+    if owners.is_empty() {
+        return HashMap::new();
+    }
+    let uid_to_account = account_id_by_uid();
+    owners
+        .into_iter()
+        .filter_map(|(session, uid)| Some((session, uid_to_account.get(&uid)?.clone())))
         .collect()
 }

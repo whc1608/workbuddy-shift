@@ -1,6 +1,8 @@
 // 新版会话库（`~/.codebuddy/codebuddy.db`）的单测：临时库 + 临时正文目录。
 
-use crate::modules::codebuddy_ide_session::conversations::{list_sessions_in, migrate_sessions_in};
+use crate::modules::codebuddy_ide_session::conversations::{
+    conversation_account_uids_in, list_sessions_in, migrate_sessions_in,
+};
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -146,6 +148,40 @@ fn migrate_rejects_missing_table_and_unsafe_uid() {
     let error = migrate_sessions_in(&db, &root.join("backups"), "../bad", DST, &[])
         .unwrap_err();
     assert!(error.contains("uid 非法"), "{error}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 限额归因兜底：会话 id → 归属 uid。只返回库里真实存在、且有 uid 的会话。
+#[test]
+fn conversation_account_uids_maps_known_sessions_only() {
+    let root = temp_root("owner");
+    let db = root.join("codebuddy.db");
+    seed_db(&db);
+
+    let ids = vec![
+        ID_A.to_string(),
+        ID_DST.to_string(),
+        "not-in-db".to_string(),
+        "bad id!".to_string(),
+        String::new(),
+    ];
+    let owners = conversation_account_uids_in(&db, &ids);
+    assert_eq!(owners.len(), 2, "{owners:?}");
+    assert_eq!(owners.get(ID_A).map(String::as_str), Some(SRC));
+    assert_eq!(owners.get(ID_DST).map(String::as_str), Some(DST));
+    assert!(!owners.contains_key("not-in-db"));
+    assert!(!owners.contains_key("bad id!"));
+
+    // 空入参、库不存在、库没有该表时都返回空表（调用方据此继续丢弃事件）。
+    assert!(conversation_account_uids_in(&db, &[]).is_empty());
+    assert!(conversation_account_uids_in(&root.join("missing.db"), &ids).is_empty());
+    let plain = root.join("plain.db");
+    Connection::open(&plain)
+        .unwrap()
+        .execute_batch("CREATE TABLE other (id TEXT);")
+        .unwrap();
+    assert!(conversation_account_uids_in(&plain, &ids).is_empty());
 
     let _ = std::fs::remove_dir_all(&root);
 }
