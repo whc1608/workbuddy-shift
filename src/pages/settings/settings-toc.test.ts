@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { pickActiveSection, TOC_ACTIVE_OFFSET, type TocSectionBox } from "./settings-toc";
+import {
+  landingDelta,
+  pickActiveSection,
+  TOC_ACTIVE_OFFSET,
+  TOC_LANDING_TOP,
+  type TocSectionBox,
+} from "./settings-toc";
 
 /**
  * 目录高亮的判定规则（`pickActiveSection`）单测。
@@ -81,5 +87,44 @@ describe("pickActiveSection", () => {
 
   it("空列表返回空串（搜索把目录清空时不写回 undefined）", () => {
     expect(pickActiveSection([], VIEW_TOP, VIEW_HEIGHT, TOC_ACTIVE_OFFSET)).toBe("");
+  });
+});
+
+/**
+ * 落点校正量（`landingDelta`）单测，对应 T05 已知偶发问题 K1：
+ * 点目录后 `scrollIntoView({ behavior: "smooth" })` 只算一次目标偏移，跳转期间上方卡片
+ * 长高 89px，标题从 96px 漂到 185px → 越过判定线 → 高亮落到上一节。
+ * 平滑滚动停稳后按这个差值做一次非平滑校正，把它拉回 96px。
+ */
+describe("landingDelta", () => {
+  it("正好落在目标线上返回 0", () => {
+    expect(landingDelta(TOC_LANDING_TOP, VIEW_TOP, TOC_LANDING_TOP)).toBe(0);
+  });
+
+  it("落点偏短（标题漂到 185，差 89px）返回 +89", () => {
+    // 首轮 verify 的失败几何：scrollTop 3321（应为 3410），标题 top 185。
+    expect(landingDelta(185, VIEW_TOP, TOC_LANDING_TOP)).toBe(89);
+  });
+
+  it("落点过头（多滚了 37px，标题在 59）返回 -37", () => {
+    expect(landingDelta(TOC_LANDING_TOP - 37, VIEW_TOP, TOC_LANDING_TOP)).toBe(-37);
+  });
+
+  it("±2px 内返回 0（平滑收尾的像素抖动不触发校正）", () => {
+    expect(landingDelta(TOC_LANDING_TOP + 2, VIEW_TOP, TOC_LANDING_TOP)).toBe(0);
+    expect(landingDelta(TOC_LANDING_TOP - 2, VIEW_TOP, TOC_LANDING_TOP)).toBe(0);
+    expect(landingDelta(TOC_LANDING_TOP + 1.9, VIEW_TOP, TOC_LANDING_TOP)).toBe(0);
+    expect(landingDelta(TOC_LANDING_TOP - 2.5, VIEW_TOP, TOC_LANDING_TOP)).toBe(-2.5);
+  });
+
+  it("滚动容器不贴顶时按容器可视顶度量", () => {
+    // main 的可视顶在 72px（桌面壳顶栏）时，标题停在 72+96=168 才算命中。
+    expect(landingDelta(168, 72, TOC_LANDING_TOP)).toBe(0);
+    expect(landingDelta(240, 72, TOC_LANDING_TOP)).toBe(72);
+  });
+
+  it("落点线必须落在判定线以内：校正后落地即命中目标节", () => {
+    // 校正目标 96px < 判定线 120px，否则校正完高亮还会掉回上一节。
+    expect(TOC_LANDING_TOP).toBeLessThan(TOC_ACTIVE_OFFSET);
   });
 });

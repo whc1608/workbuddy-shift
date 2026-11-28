@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 import type { SettingsGrouped } from "./sections";
+import { armLandingCorrection, SCROLL_KEYS } from "./settings-toc-landing";
+
+// 落点校正的常量与纯函数从 `./settings-toc-landing` 透出：调用方与单测都还能从这里取，
+// 不必知道实现被拆到了哪个文件。
+export { landingDelta, LANDING_TOLERANCE, TOC_LANDING_TOP } from "./settings-toc-landing";
 
 interface Props {
   /** 已按搜索过滤、且已按当前环境过滤的分组节。 */
@@ -64,6 +69,8 @@ export function pickActiveSection(
  *    避免默认跳转把锚点顶到视口最上方（被 sticky 顶栏盖住）；URL 用 `replaceState`
  *    同步，不产生历史记录，也不会触发 HashRouter 的 hashchange（演示站点用的是 HashRouter，
  *    那里的 hash 是路由本身：`#/settings`，改成 `#settings-startup` 会把页面甩回首页）。
+ *    跳转后钉住目标节，等平滑滚动停稳再量一次落点、必要时非平滑校正一次
+ *    （见 `armLandingCorrection`：上方卡片跳转期间长高会把标题推离落点，T05 K1）。
  * 2. **高亮跟随**：只有一个事实来源——滚动时用 rAF 节流重算一次「标题越线的最后一节」
  *    （`pickActiveSection`）。不用 IntersectionObserver：观察者按「回调批次里可见的条目」
  *    回写 active，平滑滚动结束时最后一批往往只有下一节，于是高亮漂到下一节（T05 缺陷 A1）。
@@ -71,12 +78,15 @@ export function pickActiveSection(
  * 3. **深链**：挂载时读一次 hash（`/settings#settings-startup`），命中已知节就滚过去，
  *    并把 active 钉在该节上，直到用户真的用手滚（wheel / touchmove / 滚动翻页键）——
  *    卡片里的数据加载完成后行高会变，标题可能从 96px 漂到 130px 之外，若立刻重算，
- *    高亮会掉到上一节。用户一动手就解除钉住，回到正常跟随。
+ *    高亮会掉到上一节。用户一动手就解除钉住，回到正常跟随。深链的内容是异步加载的，
+ *    钉住本身就是正确策略，不做落点校正。
  */
 export function SettingsToc({ groups, className }: Props) {
   const [activeId, setActiveId] = useState<string>(groups[0]?.sections[0]?.id ?? "");
-  /** 深链钉住的节 id；非 null 时重算不回写 active（见上方注释 3）。 */
+  /** 跳转/深链钉住的节 id；非 null 时重算不回写 active（见上方注释 2、3）。 */
   const pinnedRef = useRef<string | null>(null);
+  /** 待执行/进行中的落点校正的取消函数（见 `armLandingCorrection`）。 */
+  const landingCancelRef = useRef<(() => void) | null>(null);
 
   // 目录项的 id 串：用它当 effect 依赖。groups 每次渲染都是新数组，
   // 直接当依赖会让监听器每帧重建（滚动时反复 add/remove 事件）。
@@ -175,15 +185,34 @@ export function SettingsToc({ groups, className }: Props) {
   function jump(id: string) {
     const element = document.getElementById(id);
     if (!element) return;
-    pinnedRef.current = null;
+    const scroller = findScrollContainer(element);
+    // 上一次跳转的落点校正还没走完就再点：只保留最后一次（连点两个目录项时不互相拉扯）。
+    landingCancelRef.current?.();
+    landingCancelRef.current = null;
+    // 平滑滚动期间钉住目标节：上方卡片加载/状态切换改行高时，重算不许把 active 写回上一节。
+    pinnedRef.current = id;
     setActiveId(id);
     element.scrollIntoView({ block: "start", behavior: "smooth" });
     if (typeof window !== "undefined" && !window.location.hash.startsWith("#/")) {
       window.history.replaceState(null, "", `#${id}`);
     }
-    // 不再用定时器「交还」：平滑滚动的每一帧都会重算，落点标题停在 96px <= 判定线 120px，
-    // 重算结果必然还是这一节；即便用户中途插进来滚走，位置判定也会如实跟到新的节。
+    landingCancelRef.current = armLandingCorrection({
+      scroller,
+      target: element,
+      id,
+      pinnedRef,
+      setActiveId,
+    });
   }
+
+  // 卸载时取消还在等 `scrollend`/定时器的落点校正，避免对已卸载的组件写 state。
+  useEffect(
+    () => () => {
+      landingCancelRef.current?.();
+      landingCancelRef.current = null;
+    },
+    [],
+  );
 
   // `top-10`（40px）而不是贴顶：macOS 桌面壳在窗口顶部固定了一条 32px 高的
   // `data-tauri-drag-region`（`src/App.tsx` 的 hasUnifiedTitleBar），贴顶的目录
@@ -225,18 +254,6 @@ export function SettingsToc({ groups, className }: Props) {
     </nav>
   );
 }
-
-/** 触发「解除深链钉住」的按键：滚动类按键，普通输入不算。 */
-const SCROLL_KEYS = new Set([
-  "ArrowUp",
-  "ArrowDown",
-  "PageUp",
-  "PageDown",
-  "Home",
-  "End",
-  " ",
-  "Spacebar",
-]);
 
 /**
  * 找最近的可滚动祖先；都没有就退回文档。

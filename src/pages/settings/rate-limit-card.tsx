@@ -14,16 +14,7 @@ import type {
 import { RestoreDefaultsRow, stripDefaults } from "./restore-defaults";
 import { SettingsFieldRow, SettingsGroup } from "./rows";
 
-/**
- * 上游 issue 编号：VS Code 插件从未触发限额（第三轮第 20 条）。
- *
- * 只引用编号，不拼完整 URL：仓库门禁 `scripts/check-structure.mjs` 禁止旧产品名出现在
- * 代码里，而派生来源仓库路径必然含它；要贴可点击的完整链接需先在 `AGENTS.md` 第 7 节
- * 登记例外（主理人决策，不在本条允许的改动范围内）。
- */
-const VSCODE_LIMIT_ISSUE_NUMBER = 188;
-
-/** 限额监听：总开关 + hook 接入状态（CLI / WorkBuddy 实时上报，IDE 仍走日志扫描）。 */
+/** 限额监听：总开关 + hook 接入状态（CLI / WorkBuddy 实时上报，桌面 IDE 与 VS Code 插件走日志扫描）。 */
 export function RateLimitCard() {
   const [config, setConfig] = useState<RateLimitConfig | null>(null);
   const [status, setStatus] = useState<RateLimitHookStatus | null>(null);
@@ -63,8 +54,8 @@ export function RateLimitCard() {
   }
 
   /**
-   * 「扫描 CodeBuddy IDE 日志」独立开关：只关两个 IDE 的日志来源（IDE 的 429 不触发任何
-   * 事件，日志是它唯一的数据源），CLI / WorkBuddy 的 hook 通路不受影响。
+   * 「扫描 CodeBuddy IDE 日志」独立开关：关掉两个桌面 IDE 与 VS Code 插件宿主的日志来源
+   * （这两类的 429 不触发任何事件，日志是它们唯一的数据源），CLI / WorkBuddy 的 hook 通路不受影响。
    */
   /** 跨客户端兜底（13-B）：只影响账号卡是否提示「其它客户端限流至 …」。 */
   async function onToggleCrossClient(crossClientInfer: boolean) {
@@ -96,7 +87,7 @@ export function RateLimitCard() {
       toast.success(
         scanIdeLogs
           ? "已开启 IDE 日志扫描"
-          : "已关闭 IDE 日志扫描：两个 CodeBuddy IDE 的限额不再显示",
+          : "已关闭日志扫描：CodeBuddy 桌面 IDE 与 VS Code 插件的限额不再显示",
       );
     } catch (e) {
       setConfig(previous);
@@ -177,11 +168,10 @@ export function RateLimitCard() {
   const existingTargets = status?.targets.filter((target) => target.exists) ?? [];
   const installedCount = existingTargets.filter((target) => target.installed).length;
   // IDE 的限额只有日志一条来源：扫描开关关闭时文案不能再说「仍按日志扫描」。
-  // 这里只指两个**桌面** IDE：VS Code 插件没有可解析日志，接不接这个开关都不显示。
   const ideNote =
     config?.scanIdeLogs === false
-      ? "CodeBuddy 桌面 IDE 的日志扫描已关闭"
-      : "CodeBuddy 桌面 IDE 无事件，仍按日志扫描";
+      ? "CodeBuddy 桌面 IDE 与 VS Code 插件的日志扫描已关闭"
+      : "CodeBuddy 桌面 IDE 与 VS Code 插件无事件，仍按日志扫描";
   const hookDescription = status
     ? existingTargets.length === 0
       ? `未检测到 CodeBuddy CLI / WorkBuddy 客户端：没有可接入的配置（${ideNote}）`
@@ -212,7 +202,7 @@ export function RateLimitCard() {
 
         <SettingsFieldRow
           label="扫描 CodeBuddy IDE 日志"
-          description="两个桌面 IDE 的限额只有日志一条来源，关掉后不再显示；CodeBuddy CLI / WorkBuddy 的实时上报不受影响。VS Code 插件暂不支持（见下方说明）"
+          description="CodeBuddy 桌面 IDE 与 VS Code 插件的限额只有日志一条来源，关掉后不再显示；CodeBuddy CLI / WorkBuddy 的实时上报不受影响。"
           htmlFor="rl-ide-scan"
           operational
         >
@@ -227,7 +217,7 @@ export function RateLimitCard() {
 
         <SettingsFieldRow
           label="跨客户端限额提示"
-          description="VS Code 没有自己的限额记录时，用同账号其它客户端（WorkBuddy / CLI / IDE）的限额提示「其它客户端限流至 …」；只作提示，不改任何客户端自己的数字"
+          description="当前账号没有该模型的限额记录时，用同账号其它客户端（WorkBuddy / CLI / IDE）的限额提示「其它客户端限流至 …」；只作提示，不改任何客户端自己的数字"
           htmlFor="rl-cross-client"
           operational
         >
@@ -276,21 +266,14 @@ export function RateLimitCard() {
         </div>
 
         {/*
-          VS Code 插件的限额是**能力缺口**，不是偶发不触发（第三轮第 20 条，issue #188）：
-          它既不在扫描来源里，日志里也没有可解析的限流文案（本机实测 0 命中），
-          更没有等价的 hook。取证不足以接入，因此这里明确写「不支持」并把需求转上游，
-          不留下任何「已支持」的暗示。
+          VS Code 插件的限额走**日志来源**：插件宿主的 429 记录落在 `exthost/<插件>/` 下，
+          两个桌面 IDE 的目录里没有，因此单独作为一路日志来源扫描。
+          识别是尽力而为的：只读本机日志、不注入插件；没有实时上报通道，最多滞后一个扫描周期。
         */}
         <div className="border-t border-border/50 px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">
-          <p className="font-medium text-foreground">VS Code 插件：暂不支持限额显示</p>
+          <p className="font-medium text-foreground">VS Code 插件：按本地日志识别（尽力而为）</p>
           <p className="mt-1">
-            VS Code 里的 CodeBuddy 插件不写可解析的限额日志，也没有等价的 hook，本机无法判断它的限流状态。
-            账号卡片上的限额标记只覆盖 WorkBuddy、CodeBuddy CLI 与两个 CodeBuddy 桌面 IDE。
-          </p>
-          <p className="mt-1">
-            需要插件侧写出可解析的日志或提供事件，已作为需求转上游
-            <span className="ml-1 font-medium text-foreground">issue #{VSCODE_LIMIT_ISSUE_NUMBER}</span>
-            。
+            插件宿主的日志里出现限额记录时，账号卡片会显示对应模型的限额标记与官方给出的恢复时刻；只读取本机日志，不向插件写入任何内容。插件没有实时上报通道，识别最多滞后一个扫描周期（约 5 分钟）；日志里没有记录时不会显示——看不到标记不代表没有被限流。
           </p>
           {probe ? (
             /*
