@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import SettingsPage from "./index";
+import SettingsPage, { settingsBodyClass } from "./index";
 import { visibleSettingsSections } from "./sections";
 
 /**
@@ -31,5 +31,23 @@ describe("设置页", () => {
     );
     for (const index of order) expect(index).toBeGreaterThan(-1);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+});
+
+/**
+ * 搜索空态布局（T05 缺陷 A2）：无命中时目录不渲染，若仍留着 200px 的第一列，
+ * 正文会被自动塞进那 200px 里（`after-search-kaiji.png`：提示折成三行）。
+ */
+describe("设置页主体列定义", () => {
+  it("有节时是 200px 目录 + 正文的两栏", () => {
+    const className = settingsBodyClass(true);
+    expect(className).toContain("xl:grid-cols-[200px_minmax(0,1fr)]");
+  });
+
+  it("搜索无命中时退回单列，不留 200px 的第一列", () => {
+    const className = settingsBodyClass(false);
+    expect(className).not.toContain("200px");
+    expect(className).not.toContain("grid-cols");
+    expect(className).not.toContain("xl:grid");
   });
 });

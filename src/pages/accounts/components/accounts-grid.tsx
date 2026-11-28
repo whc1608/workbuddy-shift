@@ -1,6 +1,11 @@
 import { Loader2 } from "lucide-react";
 
 import { AccountCard } from "@/components/account-card";
+import {
+  DecryptWriteHint,
+  shouldShowDecryptWriteHint,
+} from "@/components/account-card/decrypt-write-hint";
+import { displayName } from "@/lib/account-display";
 import type { AccountMeta, AppStatus } from "@/lib/types";
 import { variantAppName, variantDownloadDomain } from "@/lib/variant";
 import { cn } from "@/lib/utils";
@@ -27,6 +32,7 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
     orderedAccounts,
     variant,
     compact,
+    credentialConfig,
     checkinAvailable,
     checkinMap,
     autoCheckinSettled,
@@ -83,6 +89,18 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
     );
   }
 
+  /**
+   * 信封账号的「打开写解密」首次引导（R6-06 收尾）。
+   *
+   * 只取**展示顺序里的第一张**信封账号，避免 N 张卡各弹一个相同的提示；
+   * 配置未加载 / 已提示过 / 写解密已开启时 `find` 直接落空，不渲染任何东西。
+   * 提示通过 `AccountCard` 的 `decryptWriteHint` 槽渲染在**该卡片内部**（头部之后、积分区
+   * 之前），不占网格行、不做全页横幅。
+   */
+  const decryptHintAccount = orderedAccounts.find((account) =>
+    shouldShowDecryptWriteHint(account, credentialConfig.config),
+  );
+
   return (
     <div className={cn("grid min-w-0 gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
       {/* 不要给这个网格加 items-start：它会覆盖 Grid 默认的 stretch，让同排卡片因内容长度不同而
@@ -131,6 +149,17 @@ export function AccountsGrid({ page }: { page: AccountsPageController }) {
           onSwitchJetbrains={page.setJetbrainsSwitchTarget}
           enabledTools={enabledTools}
           featuresDisabled={false}
+          decryptWriteHint={
+            decryptHintAccount?.id === account.id ? (
+              <DecryptWriteHint
+                accountName={displayName(account)}
+                compact={compact}
+                busy={credentialConfig.saving}
+                onEnable={credentialConfig.enableWriteDecrypt}
+                onDismiss={credentialConfig.dismissFirstPrompt}
+              />
+            ) : undefined
+          }
         />
       ))}
     </div>

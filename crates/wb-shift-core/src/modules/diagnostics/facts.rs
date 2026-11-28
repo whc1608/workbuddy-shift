@@ -133,7 +133,7 @@ pub struct AccountFact {
     pub variant: String,
     /// 来源：`oauth` / `local` / `import` / `unknown`。
     pub source: String,
-    /// 该来源是否是推断值（历史账号）——是则报告里加 `?`。
+    /// 该来源是否是推断值（历史账号）——是则报告里加 `（推断）`。
     pub source_inferred: bool,
     /// access token 形态。
     pub token_kind: TokenKind,
@@ -624,7 +624,7 @@ pub fn stats_facts(now_ms: i64) -> StatsFacts {
 // 凭据事件（0.1.11 契约）
 // ---------------------------------------------------------------------------
 
-/// 一条凭据事件（0.1.11 字段固定）。
+/// 一条凭据事件（五个固定字段 + 可选 `count`）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CredentialEvent {
     /// 时间（epoch ms）。
@@ -637,6 +637,8 @@ pub struct CredentialEvent {
     pub action: String,
     /// reason 枚举。
     pub reason: String,
+    /// 该行在节流窗口内累计的次数；旧文件没有该字段按 1 读。
+    pub count: usize,
 }
 
 /// 读最近的凭据事件（按契约 JSONL），缺失 / 损坏返回空（报告写「无记录」）。
@@ -672,6 +674,13 @@ pub fn read_credential_events(path: &Path, limit: usize) -> Vec<CredentialEvent>
                     .and_then(Value::as_str)
                     .unwrap_or("unknown")
                     .to_string(),
+                // 可选字段：缺省 1；`<1` 一律归一为 1（null / 0 / 负数都不该让计数消失）。
+                count: value
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .map(|count| count as usize)
+                    .unwrap_or(1)
+                    .max(1),
             })
         })
         .collect();
@@ -683,6 +692,9 @@ pub fn read_credential_events(path: &Path, limit: usize) -> Vec<CredentialEvent>
 
 /// 各 outcome 计数（`refreshed` / `adopted` / `kept_plaintext` / `skipped_encrypted` /
 /// `temporarily_failed` / `failed`），供 `[刷新与保活]` 使用。
+///
+/// 按每行的 `count` **求和**：节流把 5 次失败压成一行 `count=5`，若仍按行数计，
+/// 诊断会告诉用户「只失败了 1 次」。
 pub fn outcome_counts(events: &[CredentialEvent]) -> Vec<(&'static str, usize)> {
     const OUTCOMES: [&str; 6] = [
         "refreshed",
@@ -695,7 +707,11 @@ pub fn outcome_counts(events: &[CredentialEvent]) -> Vec<(&'static str, usize)> 
     OUTCOMES
         .iter()
         .map(|name| {
-            let count = events.iter().filter(|event| event.action == *name).count();
+            let count = events
+                .iter()
+                .filter(|event| event.action == *name)
+                .map(|event| event.count.max(1))
+                .sum();
             (*name, count)
         })
         .collect()

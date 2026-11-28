@@ -79,17 +79,40 @@ const usageSeeds: AccountUsageSeed[] = [
       { model: "hy3", requestCount: 8, credit: 0 },
     ],
   },
+  // 资源包矩阵：用量与它的 18 个积分包无关（包只用于明细取证），给一份中等规模、
+  // 与其它账号不成比例的稳定数字，避免账号消耗构成里出现并列。
+  {
+    requestCount: 412,
+    models: [
+      { model: "deepseek-v4-flash", requestCount: 380, credit: 742.35 },
+      { model: "kimi-k3-1", requestCount: 22, credit: 318.6 },
+      { model: "hy3", requestCount: 10, credit: 0 },
+    ],
+  },
 ];
 
-/** 演示积分包种子：[名称, 总量, 剩余, N 天后到期]；与 `accounts` 严格同索引。 */
-type CreditPackageSeed = readonly [packageName: string, total: number, remaining: number, expireDays: number];
+/**
+ * 演示积分包种子：
+ * `[名称, 总量, 剩余, N 天后到期, 获取时间 = N 天前（可选）]`；与 `accounts` 严格同索引。
+ *
+ * `expireDays` 允许为负：负数表示**已过期**（`expired` 由 `expireDays < 0` 推导，
+ * 到期时间落在过去），用于演示积分明细的「过期红」。
+ * `startDaysAgo` 缺省沿用 `30 - expireDays`；过期包必须显式给值——否则获取时间会被推
+ * 到 30 天以前，「近 30 天」筛选下整行看不到（明细是按 `startAt` 过滤的）。
+ */
+type CreditPackageSeed = readonly [
+  packageName: string,
+  total: number,
+  remaining: number,
+  expireDays: number,
+  startDaysAgo?: number,
+];
 
 /**
- * 演示积分包按账号索引与 `accounts` 严格对应，覆盖卡片内容区的多种形态：
- * A（1 条）/ B（2 条）为个人版，覆盖 1 行、2 行两种高度；C 为企业版单条
- * 「企业配额」（企业接口只返回一条配额资源）；D 为企业版不限量，无积分包。
- * 说明：原先由 C 覆盖的「>2 条 → 查看全部积分包」样例随企业版改造移除，
- * 如需该样例，应由后续新增的个人版账号承载，而不是改回 C 的个人版数据。
+ * 演示积分包按账号索引与 `accounts` 严格对应，覆盖卡片内容区与积分明细的多种形态：
+ * A（1 条）/ B（2 条）为个人版，覆盖 1 行、2 行两种高度；C 为企业版单条「企业配额」
+ * （企业接口只返回一条配额资源）；D 为企业版不限量，无积分包；末位「资源包矩阵」
+ * 有 18 条，覆盖未使用灰 / 部分使用（正常色）/ 临期橙 / 过期红四态（R7-T09）。
  */
 const creditPackages: readonly (readonly CreditPackageSeed[])[] = [
   // 账号 A：1 条 → 1 行，无「查看全部积分包」
@@ -118,27 +141,74 @@ const creditPackages: readonly (readonly CreditPackageSeed[])[] = [
   ],
   // 账号 D（企业版不限量）：无积分包，creditExpiry 返回 unlimited 形态
   [],
+  // 「演示账号 · 资源包矩阵」：18 条 → 一屏 18 行 + 四态齐全（R7-T09 证据）。
+  // 获取时间（第 5 列）铺在 2–28 天前，默认「近 30 天」即可见齐全；过期包的获取时间
+  // 必须显式给值，否则按 `30 - expireDays` 推到 33 天前，会被日期范围筛掉。
+  [
+    // —— 未使用：remaining === total（明细里「已用」显示 —，条子灰） ——
+    ["CodeBuddy 个人版积分包", 1800, 1800, 46, 6],
+    ["CodeBuddy 签到赠送积分", 240, 240, 21, 12],
+    ["CodeBuddy 新用户体验包", 800, 800, 33, 18],
+    ["平台奖励积分", 600, 600, 58, 24],
+    // —— 部分使用：0 < 已用 < 总量（正常色） ——
+    ["CodeBuddy 个人版积分包", 1800, 905.5, 42, 2],
+    ["CodeBuddy 签到赠送积分", 240, 174.35, 15, 9],
+    ["活动赠送积分", 500, 320.6, 27, 4],
+    ["团队共享积分", 1200, 640.25, 36, 14],
+    ["CodeBuddy 个人版积分包", 2000, 1520.4, 61, 20],
+    ["补充包 · 月度", 1000, 880.75, 74, 26],
+    ["试用版基础用量", 400, 96.5, 19, 28],
+    // —— 临期：7 天内到期且有剩余（橙） ——
+    ["CodeBuddy 新用户体验包", 800, 386.4, 5, 25],
+    ["签到赠送积分", 300, 289.2, 3, 27],
+    // —— 已过期：到期时间在过去、仍有剩余（红） ——
+    ["增量购买积分", 1500, 412.8, -3, 20],
+    ["活动赠送积分", 600, 88.6, -10, 15],
+    // —— 其余：把 18 行铺满，获取时间分散在近 30 天内 ——
+    ["团队共享积分", 900, 733.15, 11, 8],
+    ["补充包 · 周度", 250, 41.3, 8, 17],
+    ["平台奖励积分", 700, 700, 52, 22],
+  ],
 ];
 
 function creditExpiry(accountId: string): CreditExpiry {
   const index = Math.max(0, accounts.findIndex((account) => account.id === accountId));
   const account = accounts[index] ?? accounts[0];
   const packages = creditPackages[index] ?? [];
-  const resources = packages.map(([packageName, total, remaining, expireDays], packageIndex) => ({
-    packageCode: `demo-package-${index + 1}-${packageIndex + 1}`,
-    packageName,
-    total,
-    remaining,
-    used: Number((total - remaining).toFixed(2)),
-    status: 1,
-    expireAt: futureAt(expireDays),
-    startAt: atLocalTime(Math.max(0, 30 - expireDays), 0, 17),
-    expired: false,
-    expiringSoon: expireDays <= 7,
-  }));
+  const resources = packages.map(([packageName, total, remaining, expireDays, startDaysAgo], packageIndex) => {
+    // 过期由到期天数推导：负数 = 到期时间已在过去（演示「过期红」的唯一来源）。
+    const expired = expireDays < 0;
+    return {
+      packageCode: `demo-package-${index + 1}-${packageIndex + 1}`,
+      packageName,
+      total,
+      remaining,
+      used: Number((total - remaining).toFixed(2)),
+      status: 1,
+      // `futureAt` 的 daysAhead 允许为负，等价于「N 天前」：过期包的到期时间必须落在过去。
+      expireAt: futureAt(expireDays),
+      startAt: atLocalTime(startDaysAgo ?? Math.max(0, 30 - expireDays), 0, 17),
+      expired,
+      // 已过期的包不再算「临期」：否则红色行会同时被橙色的「7 天内到期」指标统计一次。
+      expiringSoon: !expired && expireDays <= 7,
+    };
+  });
+  /**
+   * 顶层指标与包列表自洽：
+   * - `totalCapacity` = 全部包总量合计；
+   * - `totalRemaining` = **未过期**包剩余合计（过期积分已不可用，不算「还剩」）；
+   * - `expiredRemaining` = 已过期包剩余合计；后两者相加 = 包列表 remaining 总和。
+   */
   const totalCapacity = resources.reduce((sum, resource) => sum + resource.total, 0);
-  const totalRemaining = resources.reduce((sum, resource) => sum + resource.remaining, 0);
+  const totalRemaining = resources
+    .filter((resource) => !resource.expired)
+    .reduce((sum, resource) => sum + resource.remaining, 0);
+  const expiredRemaining = resources
+    .filter((resource) => resource.expired)
+    .reduce((sum, resource) => sum + resource.remaining, 0);
   const expiringSoonRemaining = resources.filter((resource) => resource.expiringSoon).reduce((sum, resource) => sum + resource.remaining, 0);
+  // 「最近到期」只看仍可用的包；已过期的到期时间在过去，混进来会显示成「三天前到期」。
+  const usableExpireAt = resources.filter((resource) => !resource.expired).map((resource) => resource.expireAt);
   const updatedAt = Date.now() - (index + 1) * 4 * 60 * 1000;
 
   // 企业版（issue #167）：企业配额不在个人版接口里，卡片按企业形态渲染。
@@ -171,10 +241,11 @@ function creditExpiry(accountId: string): CreditExpiry {
     totalCapacity,
     totalRemaining: Number(totalRemaining.toFixed(2)),
     expiringSoonRemaining: Number(expiringSoonRemaining.toFixed(2)),
-    expiredRemaining: 0,
-    soonestExpireAt: Math.min(...resources.map((resource) => resource.expireAt)),
+    expiredRemaining: Number(expiredRemaining.toFixed(2)),
+    // 无可用包时退回到全部包，避免 `Math.min()` 空数组得到 Infinity。
+    soonestExpireAt: Math.min(...(usableExpireAt.length > 0 ? usableExpireAt : resources.map((resource) => resource.expireAt))),
     expiringSoon: expiringSoonRemaining > 0,
-    expired: false,
+    expired: expiredRemaining > 0,
     resources,
   };
 }
@@ -315,8 +386,8 @@ function buildStatistics(): CreditStatistics {
     retentionDays: 90,
     coverageStartAt: atLocalTime(29, 0, 0),
     // 签到计数与 `checkinLogs()` / `events` 的构造规则保持一致：
-    // 支持签到的账号共 4 个（国内版 A/B/C/D），其中 B 为 already、其余为 success。
-    summary: { currentRemaining: Number(totalRemaining.toFixed(2)), currentCapacity: totalCapacity, usageToday, usage7Days, usageThisMonth, todayCheckedInAccounts: 4, todaySuccess: 3, todayAlready: 1, todayFailed: 0 },
+    // 支持签到的账号共 5 个（国内版 A/B/C/D + 资源包矩阵），其中 B 为 already、其余为 success。
+    summary: { currentRemaining: Number(totalRemaining.toFixed(2)), currentCapacity: totalCapacity, usageToday, usage7Days, usageThisMonth, todayCheckedInAccounts: 5, todaySuccess: 4, todayAlready: 1, todayFailed: 0 },
     daily,
     accounts: demoAccounts.map((account, index) => {
       // 国际版没有签到接口：签到态一律留空，与 `variantSupportsCheckin` 一致。

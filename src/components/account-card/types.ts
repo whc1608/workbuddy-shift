@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import type { ToolId } from "@/lib/supported-tools";
 import type { AccountMeta, CreditExpiry, RateLimitBorrowed, RateLimitEntry, TravelStatus } from "@/lib/types";
 
@@ -78,4 +80,11 @@ export interface AccountCardProps {
   featuresDisabled: boolean;
   /** 紧凑模式：头部缩成一条、按钮图标化、无 footer */
   compact?: boolean;
+  /**
+   * 卡片内的补充说明槽（当前只用于信封账号的「打开写解密」首次引导）。
+   *
+   * 渲染在头部之后、积分区之前：提示属于**这张卡**，不该被提到网格上方做成全局横幅；
+   * 缺省不传即不渲染，卡片其余行为不变。调用方负责只在需要提示的那张卡上传。
+   */
+  decryptWriteHint?: ReactNode;
 }

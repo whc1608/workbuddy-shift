@@ -11,7 +11,7 @@ resolver = "2"
 
 # 六个 crate 共享的包元数据。版本仍由各 crate 显式继承，发布时可整体升版。
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 # 最低验证版本：依赖声明的最高 MSRV 是 1.89（notify-rust），本仓库代码用
 # `cargo +1.95 check --workspace --all-targets` 实测通过，据此取 1.95。

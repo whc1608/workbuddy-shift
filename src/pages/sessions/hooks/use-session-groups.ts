@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "@/lib/api";
+import { createInFlightGuard } from "@/lib/in-flight";
+import type { InFlightGuard } from "@/lib/in-flight";
 import {
   usePersistedPreferenceState,
   type PersistedPreferenceOptions,
@@ -52,6 +54,22 @@ const GROUP_MODE_PREFERENCE: PersistedPreferenceOptions<SessionGroupMode> = {
   eventName: "workbuddy-shift:sessions-group-mode-changed",
 };
 
+/** 列表缓存的键：与「当前上下文」比较，用来丢弃切换客户端 / 档位后的过期回包。 */
+function contextKeyOf(context: { client: SessionGroupClient; scope: WbVariant | undefined }): string {
+  return `${context.client}:${context.scope ?? "all"}`;
+}
+
+export interface ReloadGroupsOptions {
+  /**
+   * 动作完成后强制重拉（默认 `false`）。
+   *
+   * `force: true` 时若有在途请求，**等它结束再发一次**，不复用旧结果 —— 复制 / 同步 / 清理
+   * 之后的 onDone 必须看到动作之后的数据。默认语义是「同一时刻最多一个列表请求」：
+   * 重复调用直接返回，不再发一次（按钮 `disabled` 只是 UI 层的第二道保险）。
+   */
+  force?: boolean;
+}
+
 export interface SessionGroupsController {
   groups: SessionGroupSummary[];
   /** 被列表隐藏的失效组数量：> 0 时仍要显示「清理失效关联组」入口。 */
@@ -101,14 +119,22 @@ export interface SessionGroupsController {
   grouped: boolean;
   /** 是否显示底部分页条：条目太少时一页装得下，去掉更清爽。 */
   showPagination: boolean;
-  reloadGroups: () => Promise<void>;
+  /**
+   * 重新拉取列表。
+   *
+   * 有在途请求时默认直接返回（不重发）；动作链用 `{ force: true }` 排队重拉一次。
+   */
+  reloadGroups: (options?: ReloadGroupsOptions) => Promise<void>;
 }
 
 /**
  * 关联会话列表：加载、缓存快照、状态筛选、搜索、排序、分组与分页。
  *
- * 竞态守卫沿用原来的两道：listRequestId 自增 + 当前 client:scope 上下文键，
- * 切换客户端/档位后旧请求的结果直接丢弃，避免把上一个客户端的数据写入当前列表。
+ * 竞态守卫是两道，各管一件事：
+ * - `in-flight` 守卫（`reloadGroups` 入口）防**重发**：同一时刻最多一个列表请求，绕过按钮
+ *   连续调用也不会真的发两次；
+ * - `listRequestId` 自增 + 当前 client:scope 上下文键防**脏写**：切换客户端/档位后旧请求的
+ *   结果直接丢弃，避免把上一个客户端的数据写入当前列表。
  */
 export function useSessionGroups(
   client: SessionGroupClient,
@@ -130,48 +156,70 @@ export function useSessionGroups(
   const [page, setPage] = useState(1);
 
   const listRequestId = useRef(0);
+  /** 「是否允许发起」的唯一来源：防重发（`requestId` 防的是过期回包，两件事）。 */
+  const guardRef = useRef<InFlightGuard | null>(null);
+  /** 每次真正发起请求时自增：只让最后一轮复位 `refreshing`，排队重跑期间不能提前复位。 */
+  const reloadRunId = useRef(0);
   const contextRef = useRef({ client, scope });
   contextRef.current = { client, scope };
-  const listContextKey = `${client}:${scope ?? "all"}`;
-  const currentContextKey = () => `${contextRef.current.client}:${contextRef.current.scope ?? "all"}`;
+  const listContextKey = contextKeyOf({ client, scope });
+  const currentContextKey = () => contextKeyOf(contextRef.current);
 
-  const reloadGroups = useCallback(async () => {
-    const key = `${client}:${scope ?? "all"}`;
-    const requestId = ++listRequestId.current;
-    // 已有快照时不再退回骨架屏：刷新是「替换数据」，不是「重新加载页面」。
-    if (!groupListCache.has(key)) setLoading(true);
-    // 刷新标记**立刻**置上（不等响应）：这是「点了刷新马上有反馈」的唯一来源。
-    setRefreshing(true);
-    setLoadError(null);
-    setStoreError(null);
-    try {
-      const result = await api.listSessionGroups(client, scope);
-      if (currentContextKey() !== key || listRequestId.current !== requestId) return;
-      groupListCache.set(key, {
-        groups: result.groups,
-        storeStatus: result.storeStatus,
-        storeError: result.storeError ?? null,
-        deadGroupCount: result.deadGroupCount ?? 0,
-        pruneBlocked: result.pruneBlocked ?? null,
-      });
-      setGroups(result.groups);
-      setDeadGroupCount(result.deadGroupCount ?? 0);
-      setPruneBlocked(result.pruneBlocked ?? null);
-      setStoreStatus(result.storeStatus);
-      setStoreError(result.storeError ?? null);
-      setUpdatedAt(Date.now());
-    } catch (error) {
-      if (currentContextKey() !== key || listRequestId.current !== requestId) return;
-      setGroups([]);
-      setLoadError(api.asError(error));
-      groupListCache.delete(key);
-    } finally {
-      if (currentContextKey() === key && listRequestId.current === requestId) {
-        setLoading(false);
-        setRefreshing(false);
+  const reloadGroups = useCallback((options: ReloadGroupsOptions = {}): Promise<void> => {
+    const guard = (guardRef.current ??= createInFlightGuard());
+    /** 这次调用是否真的发起了请求（含它自己触发的排队重跑）。 */
+    let started = false;
+    let activeKey = "";
+    let runId = 0;
+
+    const task = async (): Promise<void> => {
+      // 上下文在**执行时**读：排队重跑要拉的是「当前」客户端，而不是排队那一刻的。
+      const context = contextRef.current;
+      const key = contextKeyOf(context);
+      const requestId = ++listRequestId.current;
+      started = true;
+      activeKey = key;
+      runId = ++reloadRunId.current;
+      // 已有快照时不再退回骨架屏：刷新是「替换数据」，不是「重新加载页面」。
+      if (!groupListCache.has(key)) setLoading(true);
+      // 刷新标记**立刻**置上（不等响应）：这是「点了刷新马上有反馈」的唯一来源。
+      setRefreshing(true);
+      setLoadError(null);
+      setStoreError(null);
+      try {
+        const result = await api.listSessionGroups(context.client, context.scope);
+        if (contextKeyOf(contextRef.current) !== key || listRequestId.current !== requestId) return;
+        groupListCache.set(key, {
+          groups: result.groups,
+          storeStatus: result.storeStatus,
+          storeError: result.storeError ?? null,
+          deadGroupCount: result.deadGroupCount ?? 0,
+          pruneBlocked: result.pruneBlocked ?? null,
+        });
+        setGroups(result.groups);
+        setDeadGroupCount(result.deadGroupCount ?? 0);
+        setPruneBlocked(result.pruneBlocked ?? null);
+        setStoreStatus(result.storeStatus);
+        setStoreError(result.storeError ?? null);
+        setUpdatedAt(Date.now());
+      } catch (error) {
+        if (contextKeyOf(contextRef.current) !== key || listRequestId.current !== requestId) return;
+        setGroups([]);
+        setLoadError(api.asError(error));
+        groupListCache.delete(key);
       }
-    }
-  }, [client, scope]);
+    };
+
+    // 空闲时立刻执行；在途时默认复用（不重发），`force` 排队等它结束再执行一次。
+    return guard.run(task, { force: options.force === true }).finally(() => {
+      // 只有真正发起过请求、且仍是最新一轮的调用才复位：
+      // ① 复用在途请求的调用不能把别人的刷新态关掉；② 排队重跑期间 `refreshing` 必须保持 true。
+      if (!started || runId !== reloadRunId.current) return;
+      if (contextKeyOf(contextRef.current) !== activeKey) return;
+      setLoading(false);
+      setRefreshing(false);
+    });
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -180,6 +228,8 @@ export function useSessionGroups(
     const cached = groupListCache.get(key);
     setLoading(!cached);
     // 挂载/切客户端后也有一个在途请求：即使有快照也要顶住「刷新」按钮，避免重复请求。
+    // 这一个请求不并入 `reloadGroups` 的 in-flight 守卫：它的错误口径不同（有快照时保留画面，
+    // 不清空列表、不删缓存）。两者意外并发时由 `listRequestId` 保证只有最后一次的结果会写进状态。
     setRefreshing(true);
     setLoadError(null);
     if (cached) {

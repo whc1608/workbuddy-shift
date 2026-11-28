@@ -66,9 +66,13 @@ describe("积分条配色偏好", () => {
     expect(CreditBarPalettePreference.eventName).toBe("workbuddy-shift:credit-palette-changed");
   });
 
-  it("theme 的正常色是主题蓝，traffic 的正常色是绿；两套的临期橙与过期红相同", () => {
+  it("theme 的正常色是主题蓝，traffic 的正常色是数据系列绿；两套的临期橙与过期红相同", () => {
     expect(creditBarTones("theme").normal).toBe("bg-[var(--data-series-blue)]");
-    expect(creditBarTones("traffic").normal).toBe("bg-emerald-500/75");
+    expect(creditBarTones("traffic").normal).toBe("bg-[var(--data-series-green)]/75");
+    // 两种正常态都必须是 token，不允许出现调色板色阶类（否则深色/换主题要逐处改组件）。
+    for (const tone of [creditBarTones("theme").normal, creditBarTones("traffic").normal]) {
+      expect(tone).toContain("var(--data-series-");
+    }
     expect(creditBarTones("theme").expiringSoon).toBe("bg-orange-500/80");
     expect(creditBarTones("traffic").expiringSoon).toBe(creditBarTones("theme").expiringSoon);
     expect(creditBarTones("theme").expired).toBe("bg-red-600/60 dark:bg-red-400/60");

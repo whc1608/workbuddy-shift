@@ -16,6 +16,10 @@ import {
  * 临期橙与已过期红两套完全相同：这两态表达的是**风险**，不该被用户偏好改掉，
  * 否则「临期」可能在两套配色里长得不一样，反而看不出紧迫程度。
  *
+ * 两种「正常态」都走数据系列 token：默认蓝用 `--data-series-blue`，traffic 的绿用
+ * `--data-series-green`（见 `index.css`）。**组件层不写字面色值**，也不直接引用调色板
+ * 色阶类——换主题 / 深色适配只改 token，改一处即全站生效。
+ *
  * 类名字符串必须是字面量：Tailwind 只静态扫描源码里的完整类名，运行时拼接（`bg-${x}`）
  * 会被裁掉，生产构建里条子直接没有颜色。所以两套色调写成常量表，不做字符串运算。
  */
@@ -44,8 +48,8 @@ const EXPIRED_TONE = "bg-red-600/60 dark:bg-red-400/60";
 const EXPIRING_SOON_TONE = "bg-orange-500/80";
 /** 正常可用 · 主题蓝。 */
 const THEME_NORMAL_TONE = "bg-[var(--data-series-blue)]";
-/** 正常可用 · 绿橙红里的绿。 */
-const TRAFFIC_NORMAL_TONE = "bg-emerald-500/75";
+/** 正常可用 · 绿橙红里的绿：同样走数据系列 token（`--data-series-green`，75% 不透明度）。 */
+const TRAFFIC_NORMAL_TONE = "bg-[var(--data-series-green)]/75";
 
 /** 两套色调的唯一来源；调用方只读，不要就地改写。 */
 const CREDIT_BAR_TONES: Record<CreditBarPalette, CreditBarTones> = {

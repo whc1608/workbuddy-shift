@@ -516,6 +516,7 @@ fn credential_health_line_lists_states_without_identity() {
             variant: "cn".to_string(),
             action: "refreshed".to_string(),
             reason: "ok".to_string(),
+            count: 1,
         }],
         now,
     );
@@ -553,5 +554,117 @@ fn credential_health_line_lists_states_without_identity() {
             "诊断包泄漏了 {secret}：\n{report}"
         );
     }
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 推断来源用中文后缀标注：无 `credentialSource` 但含 `auth` + `account` → `local（推断）`；
+/// 显式 `credentialSource: "local"` 不带后缀（有据可查的就不该说成推断）。
+#[test]
+fn inferred_source_is_marked_with_chinese_suffix() {
+    let now = 1_700_000_000_000i64;
+    let accounts = vec![
+        json!({
+            "access_token": "TOKEN-A",
+            "auth": {"accessToken": "live-a"},
+            "account": {"id": "account-a"},
+        }),
+        json!({
+            "access_token": "TOKEN-B",
+            "credentialSource": "local",
+        }),
+    ];
+    let (dir, log) = temp_log("source-inferred");
+    std::fs::write(&log, "").expect("空日志");
+    let report_facts = ReportFacts {
+        accounts: facts::account_facts(&accounts, now),
+        ..Default::default()
+    };
+    let report = build_report(&input(), &base_sources(log, report_facts));
+    let line_of = |index: &str| {
+        report
+            .lines()
+            .find(|line| line.trim_start().starts_with(index))
+            .unwrap_or_else(|| panic!("缺少 {index} 行：\n{report}"))
+            .to_string()
+    };
+    let inferred = line_of("#1 ");
+    assert!(
+        inferred.contains("来源=local（推断）"),
+        "推断来源应带中文后缀：{inferred}"
+    );
+    let explicit = line_of("#2 ");
+    assert!(
+        explicit.contains("来源=local "),
+        "显式来源应原样输出：{explicit}"
+    );
+    assert!(
+        !explicit.contains("（推断）"),
+        "显式来源不得被标成推断：{explicit}"
+    );
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 节流合并后的行带 `×N`，`outcome_counts` 按 `count` 求和（5 次失败不能只算 1 次）。
+#[test]
+fn throttled_event_shows_count_and_outcomes_sum_by_count() {
+    let now = 1_700_000_000_000i64;
+    let (dir, log) = temp_log("event-count");
+    std::fs::write(&log, "").expect("空日志");
+    let event = facts::CredentialEvent {
+        ts: now,
+        account: 3,
+        variant: "cn".to_string(),
+        action: "decrypt_failed".to_string(),
+        reason: "decrypt_binding_missing".to_string(),
+        count: 5,
+    };
+    let report_facts = ReportFacts {
+        credential_events: vec![event.clone()],
+        ..Default::default()
+    };
+    let report = build_report(&input(), &base_sources(log, report_facts));
+    assert!(
+        report.contains("decrypt_failed/decrypt_binding_missing ×5"),
+        "合并事件应带 ×5：\n{report}"
+    );
+
+    // 空文件没有事件时不应冒出 `×1`。
+    assert!(!report.contains("×1"), "count=1 不写后缀：\n{report}");
+
+    // 事件文件里的 `count` 会被解析出来；缺省按 1。
+    let events_path = dir.join("credential-events.jsonl");
+    std::fs::write(
+        &events_path,
+        concat!(
+            r#"{"ts":1700000000100,"account":3,"variant":"cn","action":"decrypt_failed","reason":"decrypt_binding_missing","count":5}"#,
+            "\n",
+            r#"{"ts":1700000000200,"account":4,"variant":"cn","action":"refreshed","reason":"ok"}"#,
+            "\n"
+        ),
+    )
+    .expect("写入事件文件");
+    let parsed = facts::read_credential_events(&events_path, 10);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].count, 5, "应解析出 count");
+    assert_eq!(parsed[1].count, 1, "旧文件没有 count 按 1");
+
+    // outcome 求和用 count，不按行数。
+    let summed = facts::outcome_counts(&[
+        facts::CredentialEvent {
+            action: "refreshed".to_string(),
+            ..event.clone()
+        },
+        facts::CredentialEvent {
+            action: "refreshed".to_string(),
+            count: 0,
+            ..event
+        },
+    ]);
+    let refreshed = summed
+        .iter()
+        .find(|(name, _)| *name == "refreshed")
+        .map(|(_, count)| *count);
+    assert_eq!(refreshed, Some(6), "5 + 归一后的 1（count=0 → 1）");
+
     std::fs::remove_dir_all(&dir).expect("清理临时目录");
 }

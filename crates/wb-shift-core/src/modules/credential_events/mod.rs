@@ -4,15 +4,18 @@
 //!
 //! - **路径**：`<store_root>/credential-events.jsonl`（`~/.workbuddy-shift/`，
 //!   [`crate::modules::config::store_dir`]），UTF-8、每行一个 JSON 对象；
-//! - **字段固定且只有这五个**：`ts`（epoch 毫秒）、`account`（账号序号，int）、
-//!   `variant`（`"cn"` / `"ai"`）、`action`（枚举）、`reason`（枚举）。
+//! - **字段固定五个 + 可选 `count`**：`ts`（epoch 毫秒）、`account`（账号序号，int）、
+//!   `variant`（`"cn"` / `"ai"`）、`action`（枚举）、`reason`（枚举）；节流窗口内重复时
+//!   追加可选整数 `count`（≥2 才写，旧文件没有该字段按 1 读）。
 //!   *不写 token、不写自由文本、不写昵称/邮箱/uid/路径*——诊断包会把它原样贴给用户，
 //!   任何一项越界都等于泄露凭据或身份；
-//! - **上限 200 条**（[`MAX_EVENTS`]）：超出后原子重写只留最新 200 条；
+//! - **上限 200 条**（[`MAX_EVENTS`]）：超出后原子重写只留最新 200 条；`count` 不改变
+//!   上限口径，仍是**行数**（一次累加只改一行，不新增行）；
 //! - **写入语义**：读已有行 → 追加/必要时重写，全程持进程内写锁（并发上报不得互相覆盖）；
-//! - **节流**：同账号 + 同档位 + 同 action 在 [`THROTTLE_MS`]（60s）内只记一条，
-//!   判定靠该键最后一条记录的 `ts`。目的是让「每次启动都 adopt / 每次保活都 skip」
-//!   不会把 200 条环形窗口刷满、把真正的异常挤掉；
+//! - **节流但可计数**：同账号 + 同档位 + 同 action 在 [`THROTTLE_MS`]（60s）内不新增行，
+//!   而是把该键**最近一条**记录的 `count` 加 1（`ts` 保持不变，窗口锚点不滑动）。目的是让
+//!   「每次启动都 adopt / 每次保活都 skip」不会把 200 条环形窗口刷满、把真正的异常挤掉，
+//!   同时「连续 5 次解密失败」在诊断里仍能看到 `×5`；
 //! - **失败静默**：写不进去只 `eprintln!`，绝不让业务失败、绝不 panic（记事件不能
 //!   影响刷新/保活）。
 //!
@@ -217,14 +220,14 @@ fn parse_line(line: &str) -> Option<Value> {
     }
 }
 
-/// 该键（账号 + 档位 + action）最后一条记录的 `ts`；没有记录返回 `None`。
-fn last_ts_for_key(
+/// 该键（账号 + 档位 + action）最后一条记录的下标与 `ts`；没有记录返回 `None`。
+fn last_entry_for_key(
     lines: &[String],
     account_index: u32,
     variant: &str,
     action: &str,
-) -> Option<i64> {
-    for line in lines.iter().rev() {
+) -> Option<(usize, i64)> {
+    for (index, line) in lines.iter().enumerate().rev() {
         let Some(entry) = parse_line(line) else {
             continue;
         };
@@ -232,7 +235,10 @@ fn last_ts_for_key(
             && entry.get("variant").and_then(Value::as_str) == Some(variant)
             && entry.get("action").and_then(Value::as_str) == Some(action);
         if same {
-            return entry.get("ts").and_then(Value::as_i64);
+            return entry
+                .get("ts")
+                .and_then(Value::as_i64)
+                .map(|ts| (index, ts));
         }
     }
     None
@@ -255,6 +261,28 @@ fn append_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     writeln!(file, "{line}")
+}
+
+/// 命中节流窗口：把 `lines[index]` 的 `count` 加 1 后原子重写整份文件。调用方需持写锁。
+///
+/// - `ts` **保持不变**：窗口锚点不随重复上报滑动，否则高频事件会永远被累加、永不产生新行；
+/// - 坏行原样写回（解析失败的历史行不能因为一次累加就消失）；
+/// - 行数不变，[`MAX_EVENTS`] 的「按行数」口径不受影响；文件 ≤ 200 行，整体重写成本可接受。
+fn bump_count_locked(path: &Path, lines: &[String], index: usize) -> std::io::Result<()> {
+    let mut entry = parse_line(&lines[index]).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "节流命中的行已不是 JSON")
+    })?;
+    let next = entry
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1)
+        .saturating_add(1);
+    entry["count"] = json!(next);
+    let mut rewritten = lines.to_vec();
+    rewritten[index] = serde_json::to_string(&entry)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    atomic_write(path, &format!("{}\n", rewritten.join("\n")))
 }
 
 /// 写入指定路径（单测注入 `now` / `path`）。返回 IO 结果，由 [`record`] 决定是否忽略。
@@ -293,9 +321,11 @@ fn record_at(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // 节流必须在锁内判：否则两个并发写会同时通过「最后一条」检查，各写一条。
-    if let Some(last_ts) = last_ts_for_key(&read_lines(path), account_index, variant, action) {
+    let lines = read_lines(path);
+    if let Some((index, last_ts)) = last_entry_for_key(&lines, account_index, variant, action) {
         if at_ms.saturating_sub(last_ts) < THROTTLE_MS {
-            return Ok(());
+            // 窗口内重复：不新增行，累加最近一条的 `count`（可计数地节流）。
+            return bump_count_locked(path, &lines, index);
         }
     }
     append_line_locked(path, &line)
@@ -346,6 +376,10 @@ mod tests {
         assert_eq!(entry["variant"], json!("cn"));
         assert_eq!(entry["action"], json!("adopted"));
         assert_eq!(entry["reason"], json!("ok"));
+        assert!(
+            !entry.contains_key("count"),
+            "首次写入（计数 1）不写 count 字段"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -481,5 +515,180 @@ mod tests {
                 "`{outcome}` 必须同时是凭据事件的 action 取值"
             );
         }
+    }
+
+    /// 窗口内同键 5 次：只有 1 行，`count=5`，`ts` 停在第一次（窗口锚点不滑动）。
+    #[test]
+    fn repeated_same_key_accumulates_count() {
+        let (dir, path) = temp_path("count");
+        for index in 0..5i64 {
+            record_at(
+                &path,
+                7,
+                "cn",
+                ACTION_DECRYPT_FAILED,
+                REASON_DECRYPT_BINDING_MISSING,
+                1_000_000 + index * 1_000,
+            )
+            .unwrap();
+        }
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), 1, "窗口内同键只留一行");
+        let entry = parse_line(&lines[0]).expect("合法行");
+        assert_eq!(entry["count"], json!(5));
+        assert_eq!(entry["ts"], json!(1_000_000), "ts 不随重复上报滑动");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 过窗后重新计数：新行不带 `count`（等价于 1），旧行保留自己的 `count`。
+    #[test]
+    fn count_restarts_after_throttle_window() {
+        let (dir, path) = temp_path("count-window");
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_000_000,
+        )
+        .unwrap();
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_030_000,
+        )
+        .unwrap();
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_061_000,
+        )
+        .unwrap();
+
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), 2, "超过 60s 后必须新起一行");
+        let first = parse_line(&lines[0]).expect("合法行");
+        let second = parse_line(&lines[1]).expect("合法行");
+        assert_eq!(first["count"], json!(2));
+        assert!(second.get("count").is_none(), "新窗口的第一条不写 count");
+        assert_eq!(second["ts"], json!(1_061_000));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 换 action / 换账号是不同键：各自独立，不共享计数。
+    #[test]
+    fn different_keys_are_not_merged() {
+        let (dir, path) = temp_path("count-keys");
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_000_000,
+        )
+        .unwrap();
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_001_000,
+        )
+        .unwrap();
+        record_at(&path, 1, "cn", ACTION_DECRYPT_OK, REASON_OK, 1_002_000).unwrap();
+        record_at(
+            &path,
+            2,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_003_000,
+        )
+        .unwrap();
+        record_at(
+            &path,
+            1,
+            "ai",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_004_000,
+        )
+        .unwrap();
+
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), 4, "键不同必须各占一行");
+        let counts: Vec<Option<u64>> = lines
+            .iter()
+            .filter_map(|line| parse_line(line))
+            .map(|entry| entry.get("count").and_then(Value::as_u64))
+            .collect();
+        assert_eq!(counts, vec![Some(2), None, None, None]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 旧文件（没有 `count` 字段）仍可读，并在下一次同键上报时按 1 起累加。
+    #[test]
+    fn legacy_line_without_count_is_still_readable() {
+        let (dir, path) = temp_path("legacy");
+        std::fs::write(
+            &path,
+            "{\"ts\":1000000,\"account\":1,\"variant\":\"cn\",\"action\":\"decrypt_failed\",\"reason\":\"decrypt_timeout\"}\n",
+        )
+        .unwrap();
+        assert_eq!(recent_at(&path, 10).len(), 1, "旧行照常可读");
+
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_000_500,
+        )
+        .unwrap();
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), 1);
+        let entry = parse_line(&lines[0]).expect("合法行");
+        assert_eq!(entry["count"], json!(2), "旧行按 1 起算");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 累加重写不能把坏行丢掉：历史解析失败的行原样保留。
+    #[test]
+    fn count_rewrite_keeps_broken_lines() {
+        let (dir, path) = temp_path("count-broken");
+        let valid =
+            "{\"ts\":1000000,\"account\":1,\"variant\":\"cn\",\"action\":\"decrypt_failed\",\"reason\":\"decrypt_timeout\"}";
+        std::fs::write(&path, format!("not json\n{valid}\n")).unwrap();
+
+        record_at(
+            &path,
+            1,
+            "cn",
+            ACTION_DECRYPT_FAILED,
+            REASON_DECRYPT_TIMEOUT,
+            1_000_500,
+        )
+        .unwrap();
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "not json", "坏行必须原样保留");
+        let entry = parse_line(&lines[1]).expect("合法行");
+        assert_eq!(entry["count"], json!(2));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

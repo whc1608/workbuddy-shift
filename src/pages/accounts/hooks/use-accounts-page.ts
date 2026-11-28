@@ -15,6 +15,7 @@ import {
 import { useAccountsStore } from "@/stores/accounts";
 
 import { DEFAULT_SORT, nextSortState, parseSort, serializeSort, sortAccounts, type SortKey, type SortState } from "../ordering";
+import { useCredentialConfig } from "./use-credential-config";
 import { fetchTodayCheckinMap } from "../signals/fetch-maps";
 import { useCheckinSignals } from "../signals/use-checkin-signals";
 import { useClientStatusSignals } from "../signals/use-client-status-signals";
@@ -124,6 +125,12 @@ export function useAccountsPage() {
     accountsLength: accounts.length,
     enabledTools,
   });
+
+  /**
+   * 凭据解密设置（R6-06 收尾）：账号页只用它判断「是否要提示打开写解密」。
+   * 读取是异步且失败静默的，配置未到时 `config` 为 `null`，卡片网格照常渲染。
+   */
+  const credentialConfig = useCredentialConfig();
 
   useEffect(() => {
     void fetchAll();
@@ -402,6 +409,8 @@ export function useAccountsPage() {
     enabledTools,
     compact,
     toggleCompact,
+    /** 信封账号的写解密引导（配置为 null 时网格不渲染提示）。 */
+    credentialConfig,
     sort,
     onSortChange,
     checkinMap,

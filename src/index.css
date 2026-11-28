@@ -95,6 +95,13 @@
   --data-series-slate: #6b7a90;
   --data-series-rose: #b06f86;
   /*
+   * traffic 可选配色的正常态（设置 → 外观里的「红绿灯」方案）。
+   *
+   * 取通用绿色 500 档的观感值（#10b981），但**必须留在 token 里**：组件层不写字面色值/shadcn 调色板类，
+   * 否则换主题、深色适配都要逐处改组件。默认方案（theme）仍然只用 `--data-series-blue`。
+   */
+  --data-series-green: #10b981;
+  /*
    * 头像身份色：低饱和底 + 深文字，只用于身份识别，不与主色抢注意力。
    * `.avatar-tone-*` 工具类在文件底部读取这些变量，深色在 `.dark` 覆盖。
    */
@@ -185,6 +192,8 @@
   --data-series-violet: #a99bf7;
   --data-series-slate: #94a3b8;
   --data-series-rose: #d19ab0;
+  /* traffic 可选配色的正常态（深色）：比浅色提亮一档，保证深底上的亮度对比。 */
+  --data-series-green: #34d399;
   /* 头像身份色（深色）：同色相 18% 透明底 + 提亮文字。 */
   --avatar-0-bg: rgba(148, 163, 184, 0.18);
   --avatar-0-fg: #c9d3e4;

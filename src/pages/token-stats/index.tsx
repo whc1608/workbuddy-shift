@@ -16,6 +16,7 @@ import { usePersistedPreferenceState } from "@/lib/persisted-preference";
 import { toolEntryEnabled, useSupportedTools, type ToolId } from "@/lib/supported-tools";
 import {
   statsDateSpanDays,
+  statsRangeLabel,
   STATS_RANGE_PREFERENCE,
 } from "@/lib/stats-range";
 import {
@@ -43,7 +44,13 @@ import {
 } from "./accounts";
 import { TokenAccountSelect } from "./account-select";
 import { Dashboard } from "./dashboard";
-import { buildTokenStatsCsv, buildTokenStatsXlsx, tokenStatsFileName, tokenStatsXlsxFileName } from "./export";
+import {
+  buildTokenStatsCsv,
+  buildTokenStatsXlsx,
+  sliceTokenStatsSource,
+  tokenStatsFileName,
+  tokenStatsXlsxFileName,
+} from "./export";
 import { SourceKey, isSourceKey, persistPreferredTokenSource, readPreferredTokenSource, staleLogDays } from "./data";
 import { mergeTokenSources } from "./merge-sources";
 import { RequestDetailDialog } from "./request-detail";
@@ -239,21 +246,29 @@ export default function TokenStatsPage() {
   }, [filteredSource]);
   const include90d = rangeSpanDays >= 90 || range === "90d";
 
-  /** 导出当前来源 + 当前账号：范围是全量日期，图表时间范围不参与。 */
+  /**
+   * 导出当前来源 + 当前账号，并**跟随顶部统计范围**（R7-T04）：文件里的汇总 / 按日 /
+   * 按模型 / 请求明细与页面同一份切片函数，文件名与提示都带范围标签。
+   */
   async function exportCsv() {
     if (!filteredSource) {
       toast.error("当前数据源没有可导出的数据");
       return;
     }
     try {
-      const content = buildTokenStatsCsv(filteredSource);
+      const scoped = sliceTokenStatsSource(filteredSource, range);
+      const content = buildTokenStatsCsv(scoped, range);
       const outcome = await saveCsvFile(
-        tokenStatsFileName(filteredSource.source, selection.kind === "all" ? undefined : scopeLabel),
+        tokenStatsFileName(
+          scoped.source,
+          range,
+          selection.kind === "all" ? undefined : scopeLabel,
+        ),
         content,
       );
       if (outcome === "saved") {
         toast.success("已导出 Token 统计 CSV", {
-          description: `${filteredSource.source} · ${scopeLabel} · 全量日期 · ${(content.length / 1024).toFixed(0)} KB`,
+          description: `${scoped.source} · ${scopeLabel} · ${statsRangeLabel(range)} · ${(content.length / 1024).toFixed(0)} KB`,
         });
       }
     } catch (cause) {
@@ -263,21 +278,26 @@ export default function TokenStatsPage() {
 
 
 
-  /** 导出 Excel（xlsx）：同样按「当前来源 + 当前账号」，7 个 sheet 各一段。 */
+  /** 导出 Excel（xlsx）：同样按「当前来源 + 当前账号 + 当前范围」，7 个 sheet 各一段。 */
   async function exportXlsx() {
     if (!filteredSource) {
       toast.error("当前数据源没有可导出的数据");
       return;
     }
     try {
-      const bytes = buildTokenStatsXlsx(filteredSource);
+      const scoped = sliceTokenStatsSource(filteredSource, range);
+      const bytes = buildTokenStatsXlsx(scoped, range);
       const outcome = await saveXlsxFile(
-        tokenStatsXlsxFileName(filteredSource.source, selection.kind === "all" ? undefined : scopeLabel),
+        tokenStatsXlsxFileName(
+          scoped.source,
+          range,
+          selection.kind === "all" ? undefined : scopeLabel,
+        ),
         bytes,
       );
       if (outcome === "saved") {
         toast.success("已导出 Token 统计 Excel", {
-          description: `${filteredSource.source} · ${scopeLabel} · 全量日期 · ${(bytes.length / 1024).toFixed(0)} KB`,
+          description: `${scoped.source} · ${scopeLabel} · ${statsRangeLabel(range)} · ${(bytes.length / 1024).toFixed(0)} KB`,
         });
       }
     } catch (cause) {
@@ -346,7 +366,7 @@ export default function TokenStatsPage() {
             disabled={!filteredSource}
             title={
               filteredSource
-                ? "导出当前数据源 + 当前账号（全量日期，不受展示范围限制）"
+                ? `导出当前数据源 + 当前账号（跟随统计范围：${statsRangeLabel(range)}）`
                 : "没有可导出的数据"
             }
             items={[

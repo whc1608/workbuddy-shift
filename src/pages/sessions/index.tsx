@@ -120,12 +120,17 @@ function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
 
   const scope = client === "codebuddyIde" ? variantScope : undefined;
   const list = useSessionGroups(client, scope);
+  /**
+   * 动作链的刷新一律 `force`：动作可能刚好撞上一次在途的列表请求，默认语义会复用在途结果
+   * （那是动作**之前**的数据），所以这里排队等它结束、再拉一次最新的。
+   */
+  const reloadAfterAction = () => list.reloadGroups({ force: true });
   const detail = useSessionDetail({
     client,
     scope,
     selectedGroupId,
     detailOpen,
-    reloadGroups: list.reloadGroups,
+    reloadGroups: reloadAfterAction,
   });
   const actions = useSessionActions({
     client,
@@ -135,7 +140,7 @@ function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
     setSelectedGroupId,
     closeDetail,
     detail,
-    reloadGroups: list.reloadGroups,
+    reloadGroups: reloadAfterAction,
   });
 
   function closeDetail() {
@@ -213,8 +218,9 @@ function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
   /**
    * 刷新按钮的「忙」判定：三处来源都算——首次加载、后台刷新、详情在途。
    *
-   * 按钮禁用是「连点只发一次请求」的唯一保证（不另加节流层）：从点击到 `refreshing` 置位
-   * 之间没有任何 await，React 的同一次提交就把它变成禁用态。
+   * 按钮禁用只是 UI 层的第二道保险：「同一时刻最多一个列表请求」由
+   * `useSessionGroups` 的 in-flight 守卫保证（`reloadGroups` 入口短路），
+   * 因此合成事件、键盘重复触发也发不出第二个请求。
    */
   const refreshBusy = list.loading || list.refreshing || detail.detailLoading;
   /** 卡片网格列数：分组模式与平铺模式共用同一套断点。 */
@@ -235,7 +241,7 @@ function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
               <Button variant="outline" size="sm" className="shrink-0" aria-busy={refreshBusy} onClick={() => void (detailOpen && selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} disabled={refreshBusy}><RefreshCw className={refreshBusy ? "animate-spin" : undefined} />{refreshBusy ? "刷新中…" : "刷新"}</Button>
               {syncAllCandidates.groupCount > 0 && <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.requestSyncAll(list.groups)} disabled={actions.actionBusy || list.loading}><RefreshCw className={actions.actionBusy ? "animate-spin" : undefined} />同步 {syncAllCandidates.groupCount} 个待同步组</Button>}
               {showPruneEntry({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount }) && <span className="shrink-0" title={list.pruneBlocked ?? undefined}><Button variant="outline" size="sm" onClick={() => void actions.requestPrune()} disabled={!canPruneGroups({ client, groupCount: list.groups.length, deadGroupCount: list.deadGroupCount, busy: actions.actionBusy || list.loading, blockedReason: list.pruneBlocked })}><Eraser />清理失效关联组</Button></span>}
-              <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} prefill={rebuildPrefill} onPrefillConsumed={() => setRebuildPrefill(null)} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : list.reloadGroups())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
+              <AddLinkedSessionDialog client={client} variantScope={scope} disabled={list.loading} prefill={rebuildPrefill} onPrefillConsumed={() => setRebuildPrefill(null)} onDone={() => void (selectedGroupId ? detail.reloadSelectedGroup() : reloadAfterAction())} requestRestartConfirm={(actionLabel, run) => actions.setRestartPrompt({ actionLabel, run })} />
             </div>
           </div>
           <Tabs value={client} onValueChange={changeClient} className="mt-4">

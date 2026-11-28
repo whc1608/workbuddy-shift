@@ -76,6 +76,9 @@ export function AccountCard(props: AccountCardProps) {
             />
           }
         />
+        {props.decryptWriteHint ? (
+          <div className={compact ? "px-3.5 pb-3" : "px-5 pb-3"}>{props.decryptWriteHint}</div>
+        ) : null}
         <AccountCreditSection
           account={account}
           compact={compact}

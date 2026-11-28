@@ -50,8 +50,9 @@ export const ACCOUNT_DEMO_COMMANDS = [
   "update_account_display",
 ] as const;
 
-// 演示数据按档位分组：前三行是国内版 fixture，后两行是国际版；最后一行是企业版
-// （国内）演示账号，只覆盖账号页卡片形态（「企业版」标注 + 企业配额 / 不限量）。
+// 演示数据按档位分组：前三行是国内版 fixture，后两行是国际版；D 是企业版（国内）演示账号，
+// 只覆盖账号页卡片形态（「企业版」标注 + 企业配额 / 不限量）；最后一条是「资源包矩阵」，
+// 只用于积分明细的取证（18 个资源包 / 四态），形态与个人版一致。
 // 国际版只覆盖账号页（及数据同源的积分统计视图）；Token 统计的 workbuddy-ai 源、
 // 限额台账、签到、旅行、轮换保持原有空态，见 `emptyTokenSource` 与各档位能力函数。
 export const intlAccountA: AccountMeta = { id: "demo-account-ai-a", uid: "demo-intl-001", email: "intl-a@example.com", nickname: "国际版 A", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "ai" };
@@ -68,6 +69,10 @@ export const accounts: AccountMeta[] = [
   intlAccountB,
   // 企业版不限量（limitNum=-1）：卡片应显示「不限量」+「企业配额」，无积分包。
   { id: "demo-account-d", uid: "demo-user-004", email: "test-d@example.com", nickname: "测试 D", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn", isEnterprise: true },
+  // 资源包矩阵（R7-T09）：只承载「积分明细」的取证数据（18 个资源包 + 四态）。
+  // 独立成账号而不是塞进 A/B：A 的「1 行卡片」、B 的「2 个积分包」是既有演示形态，
+  // 改它们会让账号卡截图基线整体失效。昵称/邮箱都是演示占位，不含真实账号信息。
+  { id: "demo-account-matrix", uid: "demo-user-005", email: "test-e@example.com", nickname: "演示账号 · 资源包矩阵", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null, variant: "cn" },
 ];
 
 /** 演示模式中的临时 CLI 当前账号，仅存在于本次页面会话。 */

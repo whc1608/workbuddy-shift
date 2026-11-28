@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactElement } from "react";
 
 import * as api from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { AboutCard } from "./about-card";
 import { AppearanceCard } from "./appearance-card";
 import { ArchiveSyncCard } from "./archive-sync-card";
@@ -23,6 +24,19 @@ import { StartupCard } from "./startup-card";
 import { SupportedToolsCard } from "./supported-tools-card";
 import { UpdateCard } from "./update-card";
 import { filterSections, groupSettingsSections, visibleSettingsSections } from "./sections";
+
+/**
+ * 页面主体的列定义。
+ *
+ * 有节时才铺 `[200px_1fr]` 双栏（左目录 + 右正文）。搜索无命中时 `groups` 为空、
+ * 目录不渲染，若仍留着 `200px` 的第一列，正文会被自动放进那 200px 里（T05 缺陷 A2：
+ * 空态提示被折成三行）。所以空态整块退回单列，正文按 `max-w-3xl` 居中。
+ */
+export function settingsBodyClass(hasSections: boolean): string {
+  return hasSections
+    ? "min-w-0 xl:grid xl:grid-cols-[200px_minmax(0,1fr)] xl:items-start xl:gap-10"
+    : "min-w-0";
+}
 
 /**
  * 设置页。
@@ -103,12 +117,12 @@ export default function SettingsPage() {
         />
       </header>
 
-      <div className="min-w-0 xl:grid xl:grid-cols-[200px_minmax(0,1fr)] xl:items-start xl:gap-10">
+      <div className={settingsBodyClass(groups.length > 0)}>
         {groups.length > 0 ? (
           <SettingsToc groups={groups} className="hidden xl:block" />
         ) : null}
 
-        <div className="min-w-0 max-w-3xl space-y-10">
+        <div className={cn("min-w-0 max-w-3xl space-y-10", groups.length === 0 && "mx-auto")}>
           {groups.length === 0 ? (
             <div className="rounded-xl border border-border/60 bg-muted/25 px-4 py-6 text-center text-sm text-muted-foreground">
               没有匹配的设置项。换个词，或清空搜索查看全部。

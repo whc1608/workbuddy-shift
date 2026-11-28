@@ -503,8 +503,14 @@ fn assemble_report(input: &ReportInput, sources: &ReportSources, omit_log: bool)
         body.push("  无记录".to_string());
     } else {
         for event in &facts.credential_events {
+            // 节流窗口内的重复被合并成一行 `count`；`×N` 只在真的压过时才出现。
+            let repeat = if event.count >= 2 {
+                format!(" ×{}", event.count)
+            } else {
+                String::new()
+            };
             body.push(format!(
-                "  #{} {} {}/{}",
+                "  #{} {} {}/{}{repeat}",
                 event.account,
                 format_timestamp_with_offset(event.ts, offset),
                 event.action,
@@ -669,6 +675,7 @@ fn client_line(probe: &ClientProbe) -> String {
 ///
 /// 行格式固定：`#1 国内版 来源=oauth token=明文 access=有效(剩余 5h) refresh=有
 /// 需重登=否 最近刷新=refreshed(2h 前)`。
+/// 账号库没有 `credentialSource` 时来源是推断出来的，追加中文后缀：`来源=local（推断）`。
 fn push_credential_health(body: &mut Vec<String>, facts: &ReportFacts) {
     if facts.accounts.is_empty() {
         body.push("  （没有账号）".to_string());
@@ -676,7 +683,7 @@ fn push_credential_health(body: &mut Vec<String>, facts: &ReportFacts) {
     }
     for acc in &facts.accounts {
         let source = if acc.source_inferred {
-            format!("{}?", acc.source)
+            format!("{}（推断）", acc.source)
         } else {
             acc.source.clone()
         };

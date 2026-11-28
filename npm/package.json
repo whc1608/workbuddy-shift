@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-shift",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "WorkBuddy 账号切换工具：本地 webui（浏览器操作）+ 桌面 App（安装后运行 workbuddy-shift）",
   "repository": "git+https://github.com/magicapple123/workbuddy-shift.git",
   "homepage": "https://magicapple123.github.io/workbuddy-shift/",
@@ -16,11 +16,11 @@
     "scripts"
   ],
   "optionalDependencies": {
-    "workbuddy-shift-darwin-arm64": "0.5.2",
-    "workbuddy-shift-darwin-x64": "0.5.2",
-    "workbuddy-shift-win32-x64": "0.5.2",
-    "workbuddy-shift-linux-x64": "0.5.2",
-    "workbuddy-shift-linux-arm64": "0.5.2"
+    "workbuddy-shift-darwin-arm64": "0.5.3",
+    "workbuddy-shift-darwin-x64": "0.5.3",
+    "workbuddy-shift-win32-x64": "0.5.3",
+    "workbuddy-shift-linux-x64": "0.5.3",
+    "workbuddy-shift-linux-arm64": "0.5.3"
   },
   "scripts": {
     "postinstall": "node scripts/install.js"

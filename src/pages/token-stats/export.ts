@@ -1,8 +1,10 @@
+import { dateKey } from "@/lib/format";
+import { statsDateInRange, statsRangeLabel, type StatsRangeKey } from "@/lib/stats-range";
 import type { TokenStatsGroup, TokenStatsSource } from "@/lib/types";
 import { buildCsv, csvFileName, type CsvSection } from "@/lib/csv";
 import { buildXlsx, type XlsxCell, type XlsxSheet } from "@/lib/xlsx";
 
-import { formatRequestTime } from "./data";
+import { formatRequestTime, modelTotalsInRange, overviewTotals, rangePoints } from "./data";
 
 /**
  * Token 统计导出（清单第 17 条）。
@@ -21,6 +23,11 @@ import { formatRequestTime } from "./data";
  * | 请求明细 | 时间 · 模型 · 项目 · 会话 · 标题 · 账号 · 输入 … |
  *
  * CSV 与 xlsx 共用同一份中间结构（`ExportSection`），保证两种格式逐段数字一致。
+ *
+ * **范围口径（R7-T04）**：导出跟随页面顶部唯一的「统计范围」，不再固定导全量。
+ * 切片规则见 `sliceTokenStatsSource()`：能按日期切回来的维度（汇总 / 按日 / 按模型 /
+ * 请求明细）与页面同一份函数算；后端只给全量聚合的维度（按项目 / 按会话 / 按小时 /
+ * 按账号）保持全量——页面本身也标注「不受统计范围影响」，硬切只会得到假数字。
  */
 
 /**
@@ -73,9 +80,11 @@ function accountCell(uid?: string): string {
   return `账号 …${uid.slice(-6)}`;
 }
 
-function summarySection(source: TokenStatsSource): ExportSection {
+function summarySection(source: TokenStatsSource, range: StatsRangeKey): ExportSection {
   const summary = source.summary;
   const rows: XlsxCell[][] = [
+    // 文件里写明这份数字属于哪个范围：文件名有标签，但表内也要能自证。
+    ["统计范围", statsRangeLabel(range)],
     ["总 Token", summary.total],
     ["输入", summary.input],
     ["输出", summary.output],
@@ -155,10 +164,10 @@ function requestSection(source: TokenStatsSource): ExportSection {
   };
 }
 
-/** 一次导出用到的全部区块（CSV 与 xlsx 共用）。 */
-export function tokenStatsSections(source: TokenStatsSource): ExportSection[] {
+/** 一次导出用到的全部区块（CSV 与 xlsx 共用）；`source` 应已按范围切片。 */
+export function tokenStatsSections(source: TokenStatsSource, range: StatsRangeKey): ExportSection[] {
   return [
-    summarySection(source),
+    summarySection(source, range),
     keyedSection("按日", "日期", source.daily),
     keyedSection("按模型", "模型", source.models),
     keyedSection("按项目", "项目", source.projects),
@@ -169,8 +178,8 @@ export function tokenStatsSections(source: TokenStatsSource): ExportSection[] {
 }
 
 /** CSV：每段自己的表头；数值保持纯数字（不做强制文本）；段标题加 `# ` 前缀。 */
-export function buildTokenStatsCsv(source: TokenStatsSource): string {
-  const sections: CsvSection[] = tokenStatsSections(source).map((section) => ({
+export function buildTokenStatsCsv(source: TokenStatsSource, range: StatsRangeKey): string {
+  const sections: CsvSection[] = tokenStatsSections(source, range).map((section) => ({
     title: `# ${section.name}`,
     headers: section.header,
     rows: section.rows.map((row) => row.map((cell) => (cell === null ? "" : cell))),
@@ -179,8 +188,8 @@ export function buildTokenStatsCsv(source: TokenStatsSource): string {
 }
 
 /** xlsx：每个区块一个工作表，首行冻结 + 表头样式 + 数值类型。 */
-export function tokenStatsSheets(source: TokenStatsSource): XlsxSheet[] {
-  return tokenStatsSections(source).map((section) => ({
+export function tokenStatsSheets(source: TokenStatsSource, range: StatsRangeKey): XlsxSheet[] {
+  return tokenStatsSections(source, range).map((section) => ({
     name: section.name,
     header: section.header,
     rows: section.rows,
@@ -188,25 +197,64 @@ export function tokenStatsSheets(source: TokenStatsSource): XlsxSheet[] {
 }
 
 /** 生成 xlsx 字节（前端生成，走 Blob 下载）。 */
-export function buildTokenStatsXlsx(source: TokenStatsSource): Uint8Array {
-  return buildXlsx(tokenStatsSheets(source));
+export function buildTokenStatsXlsx(source: TokenStatsSource, range: StatsRangeKey): Uint8Array {
+  return buildXlsx(tokenStatsSheets(source, range));
 }
 
-/** 导出作用域：数据源 + 账号筛选（账号名会被清洗成安全文件名片段）。 */
-function exportScope(source: TokenStatsSource["source"], accountLabel?: string): string {
-  return accountLabel ? `${source}-${accountLabel}` : source;
+/**
+ * 把导出数据切片到当前统计范围（纯函数，页面与单测共用）。
+ *
+ * 切片口径与页面**同一份实现**，不另抄一套：
+ * - 汇总 → `overviewTotals`（首屏四卡与结论行的分子）；
+ * - 按日 → `rangePoints`（趋势图）；
+ * - 按模型 → `modelTotalsInRange`（用量分布·模型；旧后端无 `dailyByModel` 时与页面同样退回全量聚合）；
+ * - 请求明细 → 按 `timestamp` 落在范围内的行（仅 CodeBuddy CLI 提供）。
+ *
+ * 不切片：projects / sessions / hours / accounts。后端只下发全量聚合，页面也明标
+ * 「不受统计范围影响」；按范围硬切会把它们算成 0，是假数字。
+ */
+export function sliceTokenStatsSource(
+  source: TokenStatsSource,
+  range: StatsRangeKey,
+): TokenStatsSource {
+  const requests = source.requests?.filter((row) =>
+    statsDateInRange(dateKey(new Date(row.timestamp)), range),
+  );
+  return {
+    ...source,
+    summary: overviewTotals(source, range),
+    daily: rangePoints(source.daily, range),
+    models: modelTotalsInRange(source, range),
+    ...(requests ? { requests } : {}),
+  };
+}
+
+/** 文件名里的紧凑范围标签（`近 30 天` → `近30天`）；文案唯一来源是 `statsRangeLabel`。 */
+export function rangeFileLabel(range: StatsRangeKey): string {
+  return statsRangeLabel(range).replace(/\s+/g, "");
+}
+
+/** 导出作用域：数据源 + 账号筛选（账号名会被清洗成安全文件名片段）+ 范围标签。 */
+function exportScope(
+  source: TokenStatsSource["source"],
+  range: StatsRangeKey,
+  accountLabel?: string,
+): string {
+  return [source, accountLabel, rangeFileLabel(range)].filter(Boolean).join("-");
 }
 
 export function tokenStatsFileName(
   source: TokenStatsSource["source"],
+  range: StatsRangeKey,
   accountLabel?: string,
 ): string {
-  return csvFileName("token-stats", exportScope(source, accountLabel));
+  return csvFileName("token-stats", exportScope(source, range, accountLabel));
 }
 
 export function tokenStatsXlsxFileName(
   source: TokenStatsSource["source"],
+  range: StatsRangeKey,
   accountLabel?: string,
 ): string {
-  return tokenStatsFileName(source, accountLabel).replace(/\.csv$/, ".xlsx");
+  return tokenStatsFileName(source, range, accountLabel).replace(/\.csv$/, ".xlsx");
 }

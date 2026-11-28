@@ -42,7 +42,7 @@ describe("企业版 demo 数据", () => {
 
   it("统计页 mock 覆盖全部演示账号", () => {
     const stats = screenshotDemoResponse("get_credit_statistics") as CreditStatistics;
-    expect(stats.accounts).toHaveLength(6);
+    expect(stats.accounts).toHaveLength(7);
     const enterprise = stats.accounts.find((row) => row.accountId === "demo-account-d");
     expect(enterprise).toBeDefined();
     expect(enterprise?.currentRemaining).toBeNull();
@@ -57,9 +57,11 @@ describe("企业版 demo 数据", () => {
 
   it("账号列表对企业版下发 isEnterprise，个人版不下发", () => {
     const payload = screenshotDemoResponse("get_accounts") as { accounts: AccountMeta[] };
-    expect(payload.accounts).toHaveLength(6);
+    expect(payload.accounts).toHaveLength(7);
     expect(payload.accounts.find((row) => row.id === "demo-account-c")?.isEnterprise).toBe(true);
     expect(payload.accounts.find((row) => row.id === "demo-account-d")?.isEnterprise).toBe(true);
     expect(payload.accounts.find((row) => row.id === "demo-account-a")?.isEnterprise).toBeUndefined();
+    // 资源包矩阵是普通个人版账号：只承载积分明细取证数据，不带企业标记。
+    expect(payload.accounts.find((row) => row.id === "demo-account-matrix")?.isEnterprise).toBeUndefined();
   });
 });
