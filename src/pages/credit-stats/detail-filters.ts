@@ -124,3 +124,33 @@ export function filterResourcesByRange(
     return startDate !== null && statsDateInRange(startDate, range, dateKey(now));
   });
 }
+
+/** 到期时间的可比较值：缺失 / 无效（长期包）返回 `null`。 */
+function comparableExpiry(resource: CreditResource): number | null {
+  const value = resource.expireAt;
+  if (typeof value !== "number" || !Number.isFinite(value) || Number.isNaN(new Date(value).getTime())) {
+    return null;
+  }
+  return value;
+}
+
+/**
+ * 明细列表按「最早到期」在前排序，临期 / 已到期的包优先露出。
+ *
+ * 后端返回顺序没有时间语义（企业配额与个人资源包混在同一份列表里），直接渲染会出现
+ * 「11/30 到期的包排在最后」这种与直觉相反的排布。到期时间缺失（长期包）视为最大，
+ * 统一落到末尾；到期时间相同时保持后端原顺序（`Array#sort` 稳定），方便对照同一份数据。
+ */
+export function sortResourcesByExpiry(resources: readonly CreditResource[]): CreditResource[] {
+  return resources
+    .map((resource, index) => ({ resource, index, expiry: comparableExpiry(resource) }))
+    .sort((a, b) => {
+      if (a.expiry !== null && b.expiry !== null) {
+        if (a.expiry !== b.expiry) return a.expiry - b.expiry;
+      } else if (a.expiry !== b.expiry) {
+        return a.expiry === null ? 1 : -1;
+      }
+      return a.index - b.index;
+    })
+    .map((entry) => entry.resource);
+}

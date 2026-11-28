@@ -7,11 +7,14 @@ import type {
   CreditExpiry,
 } from "@/lib/types";
 
+import { sortResourcesByExpiry } from "./detail-filters";
+
 /**
  * 积分明细：每个资源包两行（名称 + 到期 / 已用 / 剩余 / 总量，下面一条通栏细进度条）。
  *
  * 这是本 fork 的自定义布局（上游 0.5.x 是六列表格并额外按获取时间过滤）：
  * - 不做按获取时间筛选，始终展示全部「剩余 > 0」的资源包，避免明细合计与标题剩余口径不一致；
+ * - 按到期时间升序排列（长期包落末尾），临期的包排在最前；
  * - 未使用（`used <= 0`）也画满条，用正常可用色而不是灰色，才不会被误读成「已用完」。
  *
  * 配色仍跟随上游的统一来源 `useCreditBarTones()`（设置 → 外观 → 积分条状态色），
@@ -40,8 +43,8 @@ export function ResourceBreakdown({ credit, loading }: { credit?: CreditExpiry; 
     );
   }
   const allResources = credit.resources ?? [];
-  // 已用完的资源包即使还没到期也不再占用明细列表
-  const resources = allResources.filter((resource) => resource.remaining > 0);
+  // 已用完的资源包即使还没到期也不再占用明细列表；按到期时间升序，临期的排在最前。
+  const resources = sortResourcesByExpiry(allResources.filter((resource) => resource.remaining > 0));
   if (allResources.length === 0) {
     return <div className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">当前没有可展示的资源包。</div>;
   }

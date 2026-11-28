@@ -9,6 +9,7 @@ import {
   filterResourcesByRange,
   isKnownStartAt,
   isRequestInRange,
+  sortResourcesByExpiry,
 } from "./detail-filters";
 
 const NOW = new Date(2026, 10, 26, 15, 30);
@@ -268,5 +269,47 @@ describe("资源包 startAt 过滤", () => {
     expect(rows).toEqual(original);
     expect(result).not.toBe(rows);
     expect(result[0]).toBe(rows[0]);
+  });
+});
+
+describe("资源包排序（按到期时间升序）", () => {
+  function expiring(packageCode: string, expireAt: number | null, expired = false): CreditResource {
+    return { ...resource(packageCode, at(11, 20)), expireAt, expired };
+  }
+
+  it("最早到期的排最前，长期包（无到期）落末尾", () => {
+    const rows = [
+      expiring("长期包", null),
+      expiring("12 月底到期", at(12, 31)),
+      expiring("11/30 到期", at(11, 30)),
+    ];
+    expect(sortResourcesByExpiry(rows).map((row) => row.packageCode)).toEqual([
+      "11/30 到期",
+      "12 月底到期",
+      "长期包",
+    ]);
+  });
+
+  it("已过期的包（到期时间最早）仍排最前，由颜色区分风险", () => {
+    const rows = [expiring("未到期", at(12, 31)), expiring("已过期", at(11, 26), true)];
+    expect(sortResourcesByExpiry(rows).map((row) => row.packageCode)).toEqual(["已过期", "未到期"]);
+  });
+
+  it("到期时间相同保持后端原顺序（稳定排序）", () => {
+    const rows = [expiring("B", at(12, 31)), expiring("A", at(12, 31)), expiring("C", at(12, 31))];
+    expect(sortResourcesByExpiry(rows).map((row) => row.packageCode)).toEqual(["B", "A", "C"]);
+  });
+
+  it("无效到期值按长期处理，且不修改输入数组", () => {
+    const rows = [
+      expiring("无效值", Number.NaN),
+      expiring("有效值", at(11, 30)),
+      expiring("缺失", null),
+    ];
+    const original = rows.map((row) => ({ ...row }));
+    const result = sortResourcesByExpiry(rows);
+    expect(result.map((row) => row.packageCode)).toEqual(["有效值", "无效值", "缺失"]);
+    expect(rows).toEqual(original);
+    expect(result).not.toBe(rows);
   });
 });
