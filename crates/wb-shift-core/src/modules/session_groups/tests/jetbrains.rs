@@ -268,6 +268,7 @@
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
             project_key: Some(JB_PROJECT_KEY.to_string()),
+            store: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -343,6 +344,7 @@
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
             project_key: Some(JB_PROJECT_KEY.to_string()),
+            store: None,
         }];
         let error = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -384,6 +386,7 @@
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
             project_key: None,
+            store: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -449,6 +452,7 @@
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
             project_key: None,
+            store: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -667,6 +671,7 @@
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
             project_key: None,
+            store: None,
         }];
         let (report, link_errors) = plugin_copy_and_register(
             JETBRAINS_STORE,
@@ -782,6 +787,7 @@
             workspace_hash: JB_WS.to_string(),
             conversation_id: JB_CONV.to_string(),
             project_key: None,
+            store: None,
         }];
         plugin_copy_and_register(
             JETBRAINS_STORE,

@@ -8,6 +8,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items).unwrap();
 
@@ -30,6 +31,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: missing.to_string(),
             project_key: None,
+            store: None,
         }];
         let report = copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items)
             .expect("returns report");
@@ -66,11 +68,13 @@
                 workspace_hash: WS.to_string(),
                 conversation_id: CONV_OLD.to_string(),
                 project_key: None,
+                store: None,
             },
             CopyItem {
                 workspace_hash: WS.to_string(),
                 conversation_id: "99999999999999999999999999999999".to_string(),
                 project_key: None,
+                store: None,
             },
         ];
         let report =
@@ -105,6 +109,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         let error =
             copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, SRC_UID, &items).unwrap_err();
@@ -118,6 +123,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         assert!(
             copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, "default", &items).is_err()
@@ -141,6 +147,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         let report = copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items)
             .expect("copy ok");
@@ -192,11 +199,13 @@
                 workspace_hash: WS.to_string(),
                 conversation_id: "bad-id".to_string(),
                 project_key: None,
+                store: None,
             },
             CopyItem {
                 workspace_hash: WS.to_string(),
                 conversation_id: "99999999999999999999999999999999".to_string(),
                 project_key: None,
+                store: None,
             },
         ];
         let report = copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items)

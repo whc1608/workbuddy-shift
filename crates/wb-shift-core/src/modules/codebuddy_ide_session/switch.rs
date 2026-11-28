@@ -1,5 +1,6 @@
 //! 切换复制编排：CN/国际版切换入口、关闭重开与报告计数。
 
+use super::conversations;
 use super::copy::*;
 use super::paths::*;
 use super::*;
@@ -70,9 +71,16 @@ pub(super) fn switch_ide_with_copy(
         );
     }
 
+    // 新版 IDE 的会话存在 CLI 会话库里（`conversations.user_id`），旧目录树不再更新；
+    // 两类条目分开处理：旧格式搬目录，新格式改归属。
+    let (db_items, legacy_items): (Vec<CopyItem>, Vec<CopyItem>) = items
+        .iter()
+        .cloned()
+        .partition(|item| item.store.as_deref() == Some(conversations::STORE_DB));
+
     // 关闭前只做确定失败的检查。源 uid 的权威读取放在关闭之后：IDE 运行时
     // `state.vscdb` 可能被占用，此时回退状态文件会误判成「上次用本工具切过的账号」。
-    if !items.is_empty() {
+    if !legacy_items.is_empty() {
         if ide_data_root().is_none() {
             return Err(
                 "未找到 CodeBuddy IDE 数据目录，无法复制会话。请先打开 CodeBuddy IDE 并登录一次。"
@@ -92,6 +100,12 @@ pub(super) fn switch_ide_with_copy(
             _ => {}
         }
     }
+    if !db_items.is_empty() && !conversations::available() {
+        return Err(
+            "未找到新版 CodeBuddy 会话库（~/.codebuddy/codebuddy.db），无法复制升级后的会话。请先打开 CodeBuddy IDE 或 CLI 一次。"
+                .to_string(),
+        );
+    }
 
     // 仅当 IDE 当时在跑且本次要重启时才关。`closed` 表示「是我们关掉的」：
     // 失败才负责开回来；`restart = true` 但本来没运行，失败路径不得把没开过的 IDE 拉起来。
@@ -101,39 +115,74 @@ pub(super) fn switch_ide_with_copy(
         flavor.close(20)?;
     }
 
-    let copy_report = if items.is_empty() {
+    let copy_report = if legacy_items.is_empty() && db_items.is_empty() {
         None
     } else {
-        let (root, source_uid) = match copy_source(flavor) {
-            Ok(source) => source,
-            Err(error) => {
-                relaunch_if_closed(flavor, closed);
-                return Err(error);
-            }
-        };
-        if source_uid == target_uid {
-            relaunch_if_closed(flavor, closed);
-            return Err("源账号与目标账号相同，无需复制会话".to_string());
-        }
-        match copy_codebuddy_ide_sessions(&root, &source_uid, &target_uid, items) {
-            Ok(mut report) => {
-                // 复制成功即登记「源 ↔ 副本」关联；登记失败不回滚复制，只写进报告。
-                let link_errors = codebuddy_ide_session_sync::register_copied_sessions(
-                    &root,
-                    &SessionPaths::for_codebuddy_ide(),
-                    account::variant_of(&acc),
-                    &report,
-                );
-                if !link_errors.is_empty() {
-                    report["linkErrors"] = json!(link_errors);
+        let mut merged: Option<Value> = None;
+        if !legacy_items.is_empty() {
+            let (root, source_uid) = match copy_source(flavor) {
+                Ok(source) => source,
+                Err(error) => {
+                    relaunch_if_closed(flavor, closed);
+                    return Err(error);
                 }
-                Some(report)
-            }
-            Err(error) => {
+            };
+            if source_uid == target_uid {
                 relaunch_if_closed(flavor, closed);
-                return Err(error);
+                return Err("源账号与目标账号相同，无需复制会话".to_string());
+            }
+            match copy_codebuddy_ide_sessions(&root, &source_uid, &target_uid, &legacy_items) {
+                Ok(mut report) => {
+                    // 复制成功即登记「源 ↔ 副本」关联；登记失败不回滚复制，只写进报告。
+                    let link_errors = codebuddy_ide_session_sync::register_copied_sessions(
+                        &root,
+                        &SessionPaths::for_codebuddy_ide(),
+                        account::variant_of(&acc),
+                        &report,
+                    );
+                    if !link_errors.is_empty() {
+                        report["linkErrors"] = json!(link_errors);
+                    }
+                    merged = Some(report);
+                }
+                Err(error) => {
+                    relaunch_if_closed(flavor, closed);
+                    return Err(error);
+                }
             }
         }
+        if !db_items.is_empty() {
+            // 源 uid 同样在关闭 IDE 之后读：运行时 secret 可能被占用。
+            let source_uid = match flavor.active_uid() {
+                Some(uid) => uid,
+                None => {
+                    relaunch_if_closed(flavor, closed);
+                    return Err(
+                        "未检测到 CodeBuddy IDE 当前登录账号，无法复制升级后的会话。"
+                            .to_string(),
+                    );
+                }
+            };
+            if source_uid == target_uid {
+                relaunch_if_closed(flavor, closed);
+                return Err("源账号与目标账号相同，无需复制会话".to_string());
+            }
+            let ids: Vec<String> = db_items
+                .iter()
+                .map(|item| item.conversation_id.clone())
+                .collect();
+            match conversations::migrate_sessions(&source_uid, &target_uid, &ids) {
+                Ok(report) => match merged.as_mut() {
+                    Some(base) => merge_copy_report(base, report),
+                    None => merged = Some(report),
+                },
+                Err(error) => {
+                    relaunch_if_closed(flavor, closed);
+                    return Err(error);
+                }
+            }
+        }
+        merged
     };
 
     let sync_report = if sync_selections.is_empty() {
@@ -201,6 +250,30 @@ pub(super) fn switch_ide_with_copy(
 }
 
 pub(super) use crate::modules::config::count_items;
+
+/// 把新版会话库的迁移报告并入旧库复制报告。
+///
+/// 两份报告形状一致（`copied` / `skipped` / `errors` / `linkErrors`），只是旧库那份可能没有
+/// 某些键；这里按「有则追加、无则补上」合并，`sourceUid` / `targetUid` 保留旧库那份。
+pub(super) fn merge_copy_report(base: &mut Value, extra: Value) {
+    let Value::Object(extra_map) = extra else {
+        return;
+    };
+    for key in ["copied", "skipped", "errors", "linkErrors"] {
+        let Some(extra_items) = extra_map.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        if extra_items.is_empty() {
+            continue;
+        }
+        match base.get_mut(key).and_then(Value::as_array_mut) {
+            Some(list) => list.extend(extra_items.iter().cloned()),
+            None => {
+                base[key] = Value::Array(extra_items.clone());
+            }
+        }
+    }
+}
 
 /// 失败兜底：只在本次确实关掉 IDE 时才 best-effort 开回来。
 pub(super) fn relaunch_if_closed(flavor: IdeFlavor, closed: bool) {

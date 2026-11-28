@@ -143,7 +143,7 @@ pub const JETBRAINS_STORE: SessionStoreSpec = SessionStoreSpec {
 pub struct CopyItem {
     /// 工作区目录名：VS Code 系 = `md5(工作区)`，JetBrains = 安装级 bucket（均 32 位小写 hex）。
     pub workspace_hash: String,
-    /// 会话 id（32 位小写 hex）。
+    /// 会话 id：旧目录树为 32 位小写 hex；新版 CodeBuddy IDE 会话库为 UUID（含 `-`）。
     pub conversation_id: String,
     /// 项目 key（`<client_dir>` 之后那一级目录名）。
     ///
@@ -152,6 +152,11 @@ pub struct CopyItem {
     /// VS Code 系忽略该字段：那一级恒为账号 uid。
     #[serde(default)]
     pub project_key: Option<String>,
+    /// 会话所在存储：`None`（旧目录树，默认）或 `"db"`（新版 CodeBuddy IDE 的 CLI 会话库）。
+    ///
+    /// 只有 CodeBuddy IDE 会写该字段；VS Code / JetBrains 忽略它，旧客户端不传时行为不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 /// 副本 id 策略：决定复制体沿用源 id 还是取新 id。

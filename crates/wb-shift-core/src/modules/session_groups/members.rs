@@ -175,6 +175,7 @@ pub fn add_member(
                 workspace_hash: location.workspace_hash,
                 conversation_id: source.session_id.clone(),
                 project_key: Some(location.project_key),
+                store: None,
             };
             // 校验（含来源内容）全部完成后，插件侧才打开编辑器生命周期窗口：为注定失败的请求关编辑器是无谓的。
             let guard = prepare_editor_window(client, restart, true, &[target_uid.as_str()])?;
@@ -319,6 +320,7 @@ pub fn copy_linked_sessions(
                     workspace_hash: location.workspace_hash,
                     conversation_id: session_id.clone(),
                     project_key: Some(location.project_key),
+                    store: None,
                 })
             }
             Some(_) => skipped.push(json!({

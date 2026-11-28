@@ -179,7 +179,11 @@ export function ClientSwitchAccountDialog({
             .map((id) => {
               const session = sessionById.get(id);
               return session
-                ? { workspaceHash: session.workspaceHash, conversationId: session.id }
+                ? {
+                    workspaceHash: session.workspaceHash,
+                    conversationId: session.id,
+                    ...(session.store ? { store: session.store } : {}),
+                  }
                 : null;
             })
             .filter((ref): ref is VscodeSessionRef => ref !== null)

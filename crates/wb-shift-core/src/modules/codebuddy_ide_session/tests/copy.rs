@@ -50,11 +50,13 @@
                     workspace_hash: WS.to_string(),
                     conversation_id: "99999999999999999999999999999999".to_string(),
                     project_key: None,
+                    store: None,
                 },
                 CopyItem {
                     workspace_hash: WS.to_string(),
                     conversation_id: "bad-id".to_string(),
                     project_key: None,
+                    store: None,
                 },
             ],
         )
@@ -89,6 +91,7 @@
                 workspace_hash: WS.to_string(),
                 conversation_id: CONV_OLD.to_string(),
                 project_key: None,
+                store: None,
             }],
         )
         .expect("returns report");
@@ -111,6 +114,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         let error = switch_codebuddy_cn_ide_with_copy(&missing, true, &items, &[]).unwrap_err();
         assert!(error.contains("账号不存在"), "{error}");
@@ -139,6 +143,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         let error = switch_codebuddy_intl_ide_with_copy(&missing, true, &items, &[]).unwrap_err();
         assert!(error.contains("账号不存在"), "{error}");
@@ -168,6 +173,7 @@
             workspace_hash: WS.to_string(),
             conversation_id: CONV_OLD.to_string(),
             project_key: None,
+            store: None,
         }];
         // uid 白名单 / 路径穿越：`default` / `Public` / 分隔符 / `..` / 空串一律拒绝。
         for uid in ["default", "Public", "a/b", "a\\b", "..", ""] {

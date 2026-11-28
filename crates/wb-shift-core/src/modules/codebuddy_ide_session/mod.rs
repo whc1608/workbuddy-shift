@@ -111,6 +111,7 @@ impl IdeFlavor {
     }
 }
 
+mod conversations;
 mod copy;
 mod list;
 mod paths;
@@ -134,4 +135,5 @@ mod tests {
     use super::paths::*;
     include!("tests/switch.rs");
     include!("tests/copy.rs");
+    include!("tests/conversations.rs");
 }

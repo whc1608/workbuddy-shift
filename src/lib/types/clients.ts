@@ -258,12 +258,21 @@ export interface VscodeSession {
   type: string;
   /** 是否包含正文消息。 */
   hasHistory: boolean;
+  /**
+   * 会话所在存储：缺省 = 旧目录树（`history/<工作区>/index.json`）；
+   * `"db"` = 新版 IDE 写进 CLI 会话库（`~/.codebuddy/codebuddy.db`）的会话。
+   *
+   * 新版会话的正文是与终端 CLI 共用的 JSONL，复制时只改会话库里的账号归属，不搬文件。
+   */
+  store?: "legacy" | "db";
 }
 
 /** 复制某项会话的引用（工作区 hash + 会话 id）。 */
 export interface VscodeSessionRef {
   workspaceHash: string;
   conversationId: string;
+  /** 与 [`VscodeSession.store`] 同义；缺省按旧目录树处理（旧后端不认识该字段也不受影响）。 */
+  store?: "legacy" | "db";
 }
 
 /** VS Code 扩展会话复制结果。 */
