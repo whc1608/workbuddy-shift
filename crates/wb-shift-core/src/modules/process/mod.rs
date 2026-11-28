@@ -76,9 +76,9 @@ pub use self::windows::windows_default_app_path;
 pub(crate) use self::windows::windows_tasklist_image_rows;
 #[cfg(target_os = "windows")]
 pub use self::windows::windows_workbuddy_exe_path;
-pub(crate) use self::windows::WindowsProcessRow;
 #[cfg(target_os = "windows")]
 pub(crate) use self::windows::TaskKillGuard;
+pub(crate) use self::windows::WindowsProcessRow;
 
 /// 创建子进程命令。Windows 上加 CREATE_NO_WINDOW，避免每次执行 tasklist/powershell
 /// 等控制台命令时闪出 cmd 黑窗口（GUI 应用卡顿/跳动的主因）。
