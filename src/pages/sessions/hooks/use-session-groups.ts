@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "@/lib/api";
+import {
+  usePersistedPreferenceState,
+  type PersistedPreferenceOptions,
+} from "@/lib/persisted-preference";
 import type { SessionGroupClient, SessionGroupSummary, WbVariant } from "@/lib/types";
 
 import { groupListCache } from "../constants";
@@ -14,6 +18,39 @@ import {
 
 // 类型原来定义在这里，现挪到纯函数模块 `../list-view` 以便单测；这里转出以保持既有 import 路径可用。
 export type { SessionGroupMode, SessionGroupSection };
+
+/** 状态筛选的合法取值（与页面的 `statusOptions` 一致）。 */
+const STATUS_FILTER_VALUES = ["all", "behind", "diverge", "latest", "missing", "unknown"];
+
+/**
+ * 列表视图偏好：状态筛选、排序、分组模式跟随用户上次的选择。
+ *
+ * 只持久化「看的方式」：搜索词不存（属一次性意图），页码也不存（数据变化后会落到
+ * 一个超出范围的空页）。`parse` 严格校验取值，认不出的旧值回默认。
+ */
+const STATUS_FILTER_PREFERENCE: PersistedPreferenceOptions<string> = {
+  key: "workbuddy-shift.sessions.status-filter",
+  fallback: "all",
+  parse: (raw) => (STATUS_FILTER_VALUES.includes(raw) ? raw : null),
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:sessions-status-filter-changed",
+};
+
+const SORT_ORDER_PREFERENCE: PersistedPreferenceOptions<string> = {
+  key: "workbuddy-shift.sessions.sort",
+  fallback: "recent",
+  parse: (raw) => (raw === "recent" || raw === "oldest" ? raw : null),
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:sessions-sort-changed",
+};
+
+const GROUP_MODE_PREFERENCE: PersistedPreferenceOptions<SessionGroupMode> = {
+  key: "workbuddy-shift.sessions.group-mode",
+  fallback: "none",
+  parse: (raw) => (raw === "none" || raw === "project" ? raw : null),
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:sessions-group-mode-changed",
+};
 
 export interface SessionGroupsController {
   groups: SessionGroupSummary[];
@@ -86,10 +123,10 @@ export function useSessionGroups(
   const [refreshing, setRefreshing] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [sortOrder, setSortOrder] = useState("recent");
+  const [statusFilter, setStatusFilter] = usePersistedPreferenceState(STATUS_FILTER_PREFERENCE);
+  const [sortOrder, setSortOrder] = usePersistedPreferenceState(SORT_ORDER_PREFERENCE);
   const [query, setQuery] = useState("");
-  const [groupMode, setGroupMode] = useState<SessionGroupMode>("none");
+  const [groupMode, setGroupMode] = usePersistedPreferenceState(GROUP_MODE_PREFERENCE);
   const [page, setPage] = useState(1);
 
   const listRequestId = useRef(0);

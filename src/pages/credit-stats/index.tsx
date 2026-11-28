@@ -28,7 +28,10 @@ import { StatsRangeControl } from "@/components/stats-range";
 import * as api from "@/lib/api";
 import { formatAmount, formatDateTime } from "@/lib/format";
 import { saveCsvFile, saveXlsxFile } from "@/lib/export-download";
-import { usePersistedPreferenceState } from "@/lib/persisted-preference";
+import {
+  usePersistedPreferenceState,
+  type PersistedPreferenceOptions,
+} from "@/lib/persisted-preference";
 import {
   invalidateCreditStatisticsCache,
   loadCreditStatistics,
@@ -117,6 +120,31 @@ function rangeFileLabel(range: StatsRangeKey): string {
  * 分不出国内版 / 国际版（档位由账号决定，另有「档位」筛选），所以国际版开关
  * 管不到这个菜单。
  */
+/**
+ * 档位与客户端筛选：记住上次看的维度（与统计范围同一套 localStorage 偏好）。
+ *
+ * 只持久化「看的角度」；取数窗口 `dataRange` 由范围偏好派生，不单独存。
+ * `parse` 严格校验取值：旧版本存过的键名可能已改名，认不出就回默认，而不是带着
+ * 非法值渲染出一个没有任何选中项的工具栏。
+ */
+const VARIANT_VIEW_PREFERENCE: PersistedPreferenceOptions<StatsVariantView> = {
+  key: "workbuddy-shift.credit-stats.variant",
+  fallback: "all",
+  parse: (raw) =>
+    VARIANT_VIEW_OPTIONS.some((option) => option.key === raw) ? (raw as StatsVariantView) : null,
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:credit-stats-variant-changed",
+};
+
+const CLIENT_VIEW_PREFERENCE: PersistedPreferenceOptions<CreditClientKey> = {
+  key: "workbuddy-shift.credit-stats.client",
+  fallback: "all",
+  parse: (raw) =>
+    Object.prototype.hasOwnProperty.call(CLIENT_VIEW_LABELS, raw) ? (raw as CreditClientKey) : null,
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:credit-stats-client-changed",
+};
+
 const CLIENT_TOOL: Partial<Record<CreditClientKey, ToolId>> = {
   workbuddy: "workbuddy",
   vscode: "vscodeExt",
@@ -166,9 +194,9 @@ export default function CreditStatsPage() {
   const [loadFailure, setLoadFailure] = useState<CreditFailureHit | null>(null);
   /** 「重新登录」复用现有的 OAuth 登录弹窗（不新造流程）。 */
   const [oauthOpen, setOauthOpen] = useState(false);
-  const [viewVariant, setViewVariant] = useState<StatsVariantView>("all");
+  const [viewVariant, setViewVariant] = usePersistedPreferenceState(VARIANT_VIEW_PREFERENCE);
   /** 客户端筛选（与档位正交）：只在明细上做，选具体值时四卡改「据明细汇总」。 */
-  const [clientView, setClientView] = useState<CreditClientKey>("all");
+  const [clientView, setClientView] = usePersistedPreferenceState(CLIENT_VIEW_PREFERENCE);
   const [rangeLoading, setRangeLoading] = useState(false);
   const initialRangeRef = useRef<CreditRange | null>(dataRange === "30d" ? null : dataRange);
   const syncedWindowKeyRef = useRef<string | null>(null);
@@ -428,7 +456,7 @@ export default function CreditStatsPage() {
     // 明细里没有该客户端（换账号、后端换了明细范围）→ 回到「全部」，不留一个空筛选项。
     if (clientView === "all") return;
     if (!clientOptions.some((option) => option.key === clientView)) setClientView("all");
-  }, [clientOptions, clientView]);
+  }, [clientOptions, clientView, setClientView]);
   const clientDetail = useMemo(() => {
     if (clientView === "all" || !filteredOfficial) return null;
     return filterOfficialByClient(filteredOfficial, clientView, variantAccountIds);

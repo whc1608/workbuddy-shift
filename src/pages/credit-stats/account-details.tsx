@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { Card, CardDescription, CardHeader } from "@/components/ui/card";
 import { formatDateTime } from "@/lib/format";
+import {
+  readPreference,
+  usePersistedPreferenceState,
+  writePreference,
+  type PersistedPreferenceOptions,
+} from "@/lib/persisted-preference";
 import type { StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditExpiry,
@@ -21,6 +27,48 @@ type DetailAccountSelection =
   | { kind: "all" }
   | { kind: "account"; accountId: string | null };
 
+/**
+ * 记住上次看的账号：切到别的页面再回来不该跳回第一个账号。
+ *
+ * 存 `all` 或 `account:<accountId>`。账号被删 / 换机器导致存的值对不上时，沿用下面
+ * `effectiveFilter` 的既有规则回退首个账号；这里**不**顺手改写存储，否则「账号列表暂时
+ * 没加载完」会被误判成「账号已删除」，把用户的选择覆盖掉。
+ */
+const ACCOUNT_SELECTION_PREFERENCE: PersistedPreferenceOptions<string> = {
+  key: "workbuddy-shift.credit-detail-account",
+  fallback: "",
+  parse: (raw) => raw,
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:credit-detail-account-changed",
+};
+
+const ACCOUNT_PREFIX = "account:";
+
+/** 「积分明细 / 请求用量」子 Tab：记住上次看的那一栏。 */
+const DETAIL_TAB_PREFERENCE: PersistedPreferenceOptions<"credits" | "requests"> = {
+  key: "workbuddy-shift.credit-detail-tab",
+  fallback: "credits",
+  parse: (raw) => (raw === "credits" || raw === "requests" ? raw : null),
+  serialize: (value) => value,
+  eventName: "workbuddy-shift:credit-detail-tab-changed",
+};
+
+function readDetailAccountSelection(): DetailAccountSelection {
+  const raw = readPreference(ACCOUNT_SELECTION_PREFERENCE);
+  if (raw === "all") return { kind: "all" };
+  if (raw.startsWith(ACCOUNT_PREFIX)) {
+    return { kind: "account", accountId: raw.slice(ACCOUNT_PREFIX.length) || null };
+  }
+  return { kind: "account", accountId: null };
+}
+
+function persistDetailAccountSelection(selection: DetailAccountSelection): void {
+  writePreference(
+    ACCOUNT_SELECTION_PREFERENCE,
+    selection.kind === "all" ? "all" : `${ACCOUNT_PREFIX}${selection.accountId ?? ""}`,
+  );
+}
+
 export function SelectedAccountDetails({
   stats,
   officialUsage,
@@ -38,14 +86,11 @@ export function SelectedAccountDetails({
   /** 页面统一的统计范围；卡片内不再另设范围按钮。 */
   range: StatsRangeKey;
 }) {
-  const [detailTab, setDetailTab] = useState<"credits" | "requests">("credits");
+  const [detailTab, setDetailTab] = usePersistedPreferenceState(DETAIL_TAB_PREFERENCE);
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
   const filterAccounts = official ? official.accounts : stats.accounts;
-  /** 默认仍选首账号；`all` 只由用户主动选择 */
-  const [accountSelection, setAccountSelection] = useState<DetailAccountSelection>(() => ({
-    kind: "account",
-    accountId: filterAccounts[0]?.accountId ?? null,
-  }));
+  /** 默认读上次的选择；没有记录时 `accountId` 为 null，再由 `effectiveFilter` 落到首账号 */
+  const [accountSelection, setAccountSelection] = useState<DetailAccountSelection>(readDetailAccountSelection);
   const activeFilterAccount =
     accountSelection.kind === "account" && accountSelection.accountId !== null
       ? filterAccounts.find((account) => account.accountId === accountSelection.accountId)
@@ -89,9 +134,12 @@ export function SelectedAccountDetails({
               <AccountFilterMenu
                 accounts={filterAccounts}
                 accountFilter={effectiveFilter}
-                onAccountFilterChange={(accountId) =>
-                  setAccountSelection(accountId === null ? { kind: "all" } : { kind: "account", accountId })
-                }
+                onAccountFilterChange={(accountId) => {
+                  const next: DetailAccountSelection =
+                    accountId === null ? { kind: "all" } : { kind: "account", accountId };
+                  persistDetailAccountSelection(next);
+                  setAccountSelection(next);
+                }}
                 ariaLabel="按账号筛选积分明细"
                 allowAll={true}
               />
