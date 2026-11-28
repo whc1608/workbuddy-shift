@@ -112,6 +112,10 @@ function rangeFileLabel(range: StatsRangeKey): string {
  *
  * 「全部 / 未知」不属于任何客户端，永远保留：未知是数据里 `client` 缺失的行，
  * 跟开关无关，去掉会让「全部」与各客户端条目之和对不上。
+ *
+ * WorkBuddy 只映射到国内版开关：官方明细的 `client` 字段只有 `WorkBuddy` 一个值，
+ * 分不出国内版 / 国际版（档位由账号决定，另有「档位」筛选），所以国际版开关
+ * 管不到这个菜单。
  */
 const CLIENT_TOOL: Partial<Record<CreditClientKey, ToolId>> = {
   workbuddy: "workbuddy",

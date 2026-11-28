@@ -7,7 +7,7 @@ import {
   WorkBuddyAiMark,
   WorkBuddyMark,
 } from "@/components/product-marks";
-import { useSupportedTools } from "@/lib/supported-tools";
+import { useSupportedTools, workbuddyEntryEnabled } from "@/lib/supported-tools";
 import type { AppStatus, WbVariant } from "@/lib/types";
 import { variantAppName, variantCodebuddyIdeName, variantUsesIntlCodebuddyIde } from "@/lib/variant";
 import type { ClientStatusSnapshot } from "@/stores/accounts";
@@ -51,7 +51,7 @@ export function ToolStatusMarks({
   return (
     <div className="flex shrink-0 items-center gap-4 pt-1">
       <div className="flex items-center gap-2.5">
-{enabledTools.workbuddy && (
+{workbuddyEntryEnabled(enabledTools, variant) && (
         <span className="group relative inline-flex cursor-default">
           <span
             className={

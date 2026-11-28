@@ -5,7 +5,8 @@ import { DemoAction } from "@/components/demo-action";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyMark } from "@/components/product-marks";
 import { demoModeEnabled } from "@/lib/demo-mode";
-import { toolEntryEnabled } from "@/lib/supported-tools";
+import { toolEntryEnabled, workbuddyEntryEnabled } from "@/lib/supported-tools";
+import { accountVariant } from "@/lib/variant";
 import { cn } from "@/lib/utils";
 
 import type { AccountCardProps } from "./types";
@@ -88,7 +89,7 @@ export function ProductCurrentState({
 export function AccountCardActions({ account, codebuddyCliActive, codebuddyCliBusy, codebuddyCliConfigured, codebuddyCliLoading, codebuddyCnIdeActive, codebuddyCnIdeAvailable, codebuddyCnIdeBusy, codebuddyCnIdeLoading, enabledTools, featuresDisabled, jetbrainsActive, jetbrainsAvailable, jetbrainsBusy, jetbrainsInstalled, jetbrainsLoading, jetbrainsPluginInstalled, onSwitch, onSwitchCodebuddyCli, onSwitchCodebuddyCnIde, onSwitchJetbrains, onSwitchVscodeExt, vscodeExtActive, vscodeExtAvailable, vscodeExtBusy, vscodeExtExtensionInstalled, vscodeExtInstalled, vscodeExtLoading, workbuddyActive }: AccountCardProps) {
   return (
         <footer className="flex flex-wrap items-center gap-2.5 border-t px-5 py-2.5">
-          {toolEntryEnabled(enabledTools, "workbuddy") && (workbuddyActive ? <ProductCurrentState product="workbuddy" compact /> : demoModeEnabled ? (
+          {workbuddyEntryEnabled(enabledTools, accountVariant(account)) && (workbuddyActive ? <ProductCurrentState product="workbuddy" compact /> : demoModeEnabled ? (
             <DemoAction>
               <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" aria-label="设为 WorkBuddy 当前账号">
                 <WorkBuddyMark size={18} /><span>设为当前</span>

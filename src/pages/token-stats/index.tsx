@@ -60,12 +60,12 @@ const SOURCE_KEYS: SourceKey[] = [
 /**
  * 来源 → 设置页「支持工具」开关：关掉的客户端不再出现在来源标签里。
  *
- * 两个 WorkBuddy 来源（国内版 / 国际版）共用同一个开关——设置页只有一个 WorkBuddy 条目，
- * 拆成两个键会让用户无从对应。
+ * WorkBuddy 国内版 / 国际版是两个独立开关（`workbuddy` / `workbuddyAi`），
+ * 与来源一一对应；其余来源与客户端一一对应。
  */
 const SOURCE_TOOL: Record<SourceKey, ToolId> = {
   workbuddy: "workbuddy",
-  "workbuddy-ai": "workbuddy",
+  "workbuddy-ai": "workbuddyAi",
   "codebuddy-cli": "codebuddyCli",
   "vscode-ext": "vscodeExt",
   jetbrains: "jetbrains",

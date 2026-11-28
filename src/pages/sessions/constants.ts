@@ -42,11 +42,18 @@ export const CLIENTS: SessionClientEntry[] = [
  * 关掉某工具就等于「它不存在」——这里不能再列出它的标签页，否则用户会看到一个
  * 已声明的关闭项，还会为它拉一遍会话组（大库上一次要几十秒）。全部关闭时返回空数组，
  * 由页面显示「未启用任何客户端」的空态，而不是硬塞一个默认客户端。
+ *
+ * WorkBuddy 是唯一一个「两个开关对应一个标签」的客户端：本页按客户端分组、不按档位，
+ * 所以国内版或国际版任一打开都要保留这个标签。
  */
 export function visibleClients(
   enabledTools: Partial<Record<ToolId, boolean>> | undefined,
 ): SessionClientEntry[] {
-  return CLIENTS.filter((item) => toolEntryEnabled(enabledTools, item.id));
+  return CLIENTS.filter((item) =>
+    item.id === "workbuddy"
+      ? toolEntryEnabled(enabledTools, "workbuddy") || toolEntryEnabled(enabledTools, "workbuddyAi")
+      : toolEntryEnabled(enabledTools, item.id),
+  );
 }
 
 /**

@@ -18,7 +18,7 @@ import {
  * 持久化在 localStorage（与 `workbuddy-shift.compact` / `workbuddy-shift.theme` 同风格），
  * 键名 `workbuddy-shift.tools.<id>`，值 `"1"` / `"0"`；缺省时取 `defaultEnabled`。
  */
-export type ToolId = "workbuddy" | "codebuddyIde" | "codebuddyCli" | "vscodeExt" | "jetbrains";
+export type ToolId = "workbuddy" | "workbuddyAi" | "codebuddyIde" | "codebuddyCli" | "vscodeExt" | "jetbrains";
 
 export interface ToolDef {
   id: ToolId;
@@ -33,8 +33,14 @@ export interface ToolDef {
 export const SUPPORTED_TOOLS: ToolDef[] = [
   {
     id: "workbuddy",
-    label: "WorkBuddy",
-    description: "WorkBuddy 桌面客户端账号切换与会话复制",
+    label: "WorkBuddy 国内版",
+    description: "WorkBuddy 桌面客户端（国内版档位）账号切换与会话复制",
+    defaultEnabled: true,
+  },
+  {
+    id: "workbuddyAi",
+    label: "WorkBuddy 国际版",
+    description: "WorkBuddy 桌面客户端（国际版档位）账号切换与会话复制",
     defaultEnabled: true,
   },
   {
@@ -94,6 +100,20 @@ export function toolEntryEnabled(
 
 export function isToolEnabled(id: ToolId): boolean {
   return readPreference(toolPreference(id));
+}
+
+/**
+ * WorkBuddy 入口开关：国内版与国际版是两个独立开关（`workbuddy` / `workbuddyAi`）。
+ *
+ * 账号卡片、页顶状态徽标必须按**账号档位**取对应的那个，否则关掉国际版会把国内版入口
+ * 一起关掉（或反过来）。关联会话页是例外：它按客户端分组、不按档位，那里任一开关打开
+ * 就显示 WorkBuddy 标签（见 `pages/sessions/constants.ts`）。
+ */
+export function workbuddyEntryEnabled(
+  enabledTools: Partial<Record<ToolId, boolean>> | undefined,
+  variant: "cn" | "ai" | undefined,
+): boolean {
+  return toolEntryEnabled(enabledTools, variant === "ai" ? "workbuddyAi" : "workbuddy");
 }
 
 export function setToolEnabled(id: ToolId, enabled: boolean): void {

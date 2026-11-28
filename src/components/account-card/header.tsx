@@ -6,7 +6,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyMark } from "@/components/product-marks";
 import { accountIdentity } from "@/lib/account-display";
 import { DEMO_UNAVAILABLE_MESSAGE, demoModeEnabled } from "@/lib/demo-mode";
-import { toolEntryEnabled } from "@/lib/supported-tools";
+import { toolEntryEnabled, workbuddyEntryEnabled } from "@/lib/supported-tools";
+import { accountVariant } from "@/lib/variant";
 import { cn } from "@/lib/utils";
 
 import type { AccountCardProps } from "./types";
@@ -95,7 +96,7 @@ export function AccountCardHeader({ account, compact = false, codebuddyCliActive
    * （未安装 / 未接入 / 正在切换），文案复用非紧凑卡按钮的 tooltip 口径，不另写一套。
    */
   const compactToolEntries: CompactToolEntry[] = [];
-  if (toolEntryEnabled(enabledTools, "workbuddy")) {
+  if (workbuddyEntryEnabled(enabledTools, accountVariant(account))) {
     compactToolEntries.push({
       id: "workbuddy",
       label: "WorkBuddy",

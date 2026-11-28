@@ -17,9 +17,10 @@ import { SettingsFieldRow, SettingsGroup } from "./rows";
 export function SupportedToolsCard() {
   const enabled = useSupportedTools();
   const variant = useAccountsStore((s) => s.variant);
-  /** 行内产品图标：与账号页页顶徽标同一套档位规则（国际版用国际版字块）。 */
+  /** 行内产品图标：WorkBuddy 两行按档位各用自己的字块，其余按客户端固定。 */
   const marks: Record<ToolId, (size: number) => ReactNode> = {
-    workbuddy: (size) => (variant === "ai" ? <WorkBuddyAiMark size={size} /> : <WorkBuddyMark size={size} />),
+    workbuddy: (size) => <WorkBuddyMark size={size} />,
+    workbuddyAi: (size) => <WorkBuddyAiMark size={size} />,
     codebuddyIde: (size) =>
       variantUsesIntlCodebuddyIde(variant) ? <CodeBuddyAiIdeMark size={size} /> : <CodeBuddyCnIdeMark size={size} />,
     codebuddyCli: (size) => <CodeBuddyMark size={size} />,
