@@ -46,9 +46,19 @@ jobs:
           target: x86_64-pc-windows-msvc
           rustflags: ""
 
-      # 不再叠一层 actions/cache：上面这个 action 默认已用 Swatinem/rust-cache 缓存
-      # `~/.cargo` 与 `target`（日志里能看到它的 Post 步骤）。两套缓存同时恢复同一份
-      # target 目录，实测多花约 50 秒且互相覆盖 key。
+      # 显式缓存 `target`：实测这是**唯一**能保住增量编译的手段。
+      # 2026-11-28 曾试过只靠上面 action 自带的 rust-cache（删掉这一步），
+      # `Build NSIS installer` 从 280s 涨到 405s、总时长 463s→507s，等于回归，
+      # 所以恢复。key 只随 Cargo.lock 变，restore-keys 兜底命中上一版。
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
