@@ -19,6 +19,8 @@ use crate::modules::variant::{codebuddy_domain_for, WbVariant};
 // 复用 process 模块带并发管道读取的正确实现；本地轮询版会在子进程输出
 // 超过 64KB（如 `ps -axo pid=,args=`）时因管道写满而死锁到超时。
 use crate::modules::process;
+// Windows 的关闭路径改走 `process::TaskKillGuard`（含「别把自己杀掉」的保护），不再直接用别名。
+#[cfg(not(target_os = "windows"))]
 use crate::modules::process::run_cmd_timeout as run_cmd;
 use crate::modules::vscode_cn_inject::{
     codebuddy_ide_data_dir, has_secret_row_for, inject_codebuddy_ide_secret,

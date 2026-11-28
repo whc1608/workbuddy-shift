@@ -78,9 +78,10 @@ pub(super) fn close_codebuddy_ide_windows(timeout_secs: i64) -> Result<(), Strin
         let _ = process::post_close_to_visible_windows(*pid);
     }
     // 无窗口的 PID 走旧行为（不带 `/F` 的 `/T`），集合与「允许强杀」同源。
+    // 走 `TaskKillGuard`：本工具若在该 IDE 的子树里（从它的终端启动），`/T` 会连自己一起杀。
+    let guard = process::TaskKillGuard::new();
     for pid in process::force_kill_targets(&pids, &window_pids) {
-        let pid_s = pid.to_string();
-        let _ = run_cmd("taskkill", &["/PID", &pid_s, "/T"], 10);
+        guard.kill("CodeBuddy", pid, false);
     }
 
     let started = Instant::now();
@@ -95,8 +96,7 @@ pub(super) fn close_codebuddy_ide_windows(timeout_secs: i64) -> Result<(), Strin
     // 重新探测：窗口可能是在上一轮探测之后才建出来的。
     let still_windowed = process::visible_window_pids(&remaining);
     for pid in process::force_kill_targets(&remaining, &still_windowed) {
-        let pid_s = pid.to_string();
-        let _ = run_cmd("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
+        guard.kill("CodeBuddy", pid, true);
     }
     let rest = timeout
         .saturating_sub(started.elapsed())

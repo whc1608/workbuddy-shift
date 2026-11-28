@@ -22,7 +22,7 @@ pub(crate) use parsing::{parse_windows_display_icon, parse_windows_process_rows}
 #[cfg(target_os = "windows")]
 pub(crate) use processes::{
     close_workbuddy_windows, existing_windows_drives, ps_output, wait_windows_pids_gone,
-    windows_tasklist_image_rows, windows_workbuddy_process_rows,
+    windows_tasklist_image_rows, windows_workbuddy_process_rows, TaskKillGuard,
 };
 pub(crate) use processes::{windows_exe_names, WindowsProcessRow};
 #[cfg(target_os = "windows")]

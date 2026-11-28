@@ -134,17 +134,17 @@ pub(super) fn terminate_codebuddy_cli_pids(pids: &[u32]) {
     }
     #[cfg(target_os = "windows")]
     {
+        // `taskkill /T` 会连子树一起收：本工具若从 CodeBuddy 的终端启动，就在这棵树里。
+        let guard = process::TaskKillGuard::new();
         for pid in pids {
-            let pid_s = pid.to_string();
-            let _ = process::run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T"], 10);
+            guard.kill("CodeBuddy CLI", *pid, false);
         }
         let remaining = process::wait_windows_pids_gone(pids, Duration::from_secs(3));
         // CLI 是终端进程，没有可以投 `SC_CLOSE` 的窗口：`window_pids` 传空集 = 残留全部可
         // 强杀（与旧行为等价）。判定仍走 [`process::force_kill_targets`]，与三条 GUI 关闭
         // 路径共用同一份「只强杀无窗口进程」的约束，不在这里另写一份。
         for pid in process::force_kill_targets(&remaining, &[]) {
-            let pid_s = pid.to_string();
-            let _ = process::run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
+            guard.kill("CodeBuddy CLI", pid, true);
         }
         let leftover = process::wait_windows_pids_gone(&remaining, Duration::from_secs(2));
         if !leftover.is_empty() {

@@ -187,12 +187,71 @@ pub(super) fn tree_kill_hits_self(target_pid: u32, ancestors: &[u32]) -> bool {
 
 /// 记录一次「为避免自杀而降级」的处置，便于事后从 error.log 解释行为差异。
 #[cfg(target_os = "windows")]
-fn record_self_tree_guard(target_pid: u32) {
+fn record_self_tree_guard(product: &str, target_pid: u32) {
     crate::modules::error_log::record(
         "backend",
-        "关闭 WorkBuddy 时命中自我保护：改为只杀目标进程，不带 /T",
-        &format!("target_pid={target_pid}（本进程在它的子树里）"),
+        "关闭客户端时命中自我保护：改为只杀目标进程，不带 /T",
+        &format!("{product} target_pid={target_pid}（本进程在它的子树里）"),
     );
+}
+
+/// 带「别把自己杀掉」保护的 `taskkill` 封装。
+///
+/// `taskkill /T` 会连整棵子树一起收：本工具若由目标客户端的终端（或它拉起的进程）启动，
+/// 就在那棵树里，关客户端会把本工具一起结束 —— 用户看到的是「两个应用一起消失」，
+/// 切换停在半路。三种真实场景：从 WorkBuddy 内置终端启动（2026-11-23）、从 CodeBuddy
+/// 的终端启动、以及工具被 IDE 的子进程拉起（2026-11-28 实证：点「复制并切换」后闪退，
+/// 会话已迁移但界面消失）。
+///
+/// 命中祖先时降级为「只杀该 PID、不带 `/T`」：目标仍是同一个进程，只是不连带它的子树，
+/// 本工具至少能活到把结果写回去。祖先链只查一次（PowerShell 调用不便宜），查询失败时
+/// 退化为旧行为——不能因为查询失败就放弃关闭进程。
+#[cfg(target_os = "windows")]
+pub(crate) struct TaskKillGuard {
+    ancestors: Vec<u32>,
+}
+
+#[cfg(target_os = "windows")]
+impl TaskKillGuard {
+    /// 解析一次本进程的祖先链。
+    pub(crate) fn new() -> Self {
+        Self {
+            ancestors: own_ancestor_pids(),
+        }
+    }
+
+    /// 关闭 `pid`：`force` 对应是否带 `/F`。
+    ///
+    /// **为什么不是直接 `taskkill /PID /T [ /F ]`**：见类型注释。命中祖先时去掉 `/T`，
+    /// 并记一条日志说明这次为什么少了树杀。
+    pub(crate) fn kill(&self, product: &str, pid: u32, force: bool) {
+        let hits_self = tree_kill_hits_self(pid, &self.ancestors);
+        if hits_self {
+            record_self_tree_guard(product, pid);
+        }
+        let args = taskkill_args(pid, force, hits_self);
+        let owned: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = run_cmd_timeout("taskkill", &owned, 10);
+    }
+}
+
+/// `taskkill` 的参数（纯函数，便于单测）：
+/// - 不命中祖先 → `/PID <p> /T [ /F ]`（保持旧行为，连子树一起收）；
+/// - 命中祖先 → `/PID <p> [ /F ]`（去掉 `/T`，否则连本进程一起被杀）。
+///
+/// 注意 `/T` 与 `/F` 的顺序：Windows 不要求顺序，但保持「先 `/T` 后 `/F`」与既有代码一致，
+/// 便于对照历史日志。
+#[cfg(target_os = "windows")]
+fn taskkill_args(pid: u32, force: bool, hits_self: bool) -> Vec<String> {
+    let pid = pid.to_string();
+    let mut args = vec!["/PID".to_string(), pid];
+    if !hits_self {
+        args.push("/T".to_string());
+    }
+    if force {
+        args.push("/F".to_string());
+    }
+    args
 }
 
 #[cfg(target_os = "windows")]
@@ -212,18 +271,12 @@ pub(crate) fn close_workbuddy_windows(variant: WbVariant, timeout_secs: i64) -> 
     // 内置终端启动本工具），整棵树就把自己也杀了 —— 切换会停在半路，用户看到的是
     // 「WorkBuddy 和 WorkBuddy Shift 一起消失」。这种情形退化为只杀目标 PID 本身：
     // 目标仍是同一个进程，只是不连带它的子树，我们至少能活到把认证写完。
-    let ancestors = own_ancestor_pids();
-    let tree_kills_self = |pid: u32| tree_kill_hits_self(pid, &ancestors);
+    let product = product_name(variant);
+    let guard = TaskKillGuard::new();
     // 没有可见窗口的 PID 走旧行为（不带 `/F` 的 `/T`）。集合与「允许强杀的 PID」同源，
     // 故复用 [`force_kill_targets`]，不另写一份「pids - window_pids」。
     for pid in force_kill_targets(&pids, &window_pids) {
-        let pid_s = pid.to_string();
-        if tree_kills_self(pid) {
-            record_self_tree_guard(pid);
-            let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s], 10);
-        } else {
-            let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T"], 10);
-        }
+        guard.kill(product, pid, false);
     }
 
     let started = Instant::now();
@@ -240,12 +293,7 @@ pub(crate) fn close_workbuddy_windows(variant: WbVariant, timeout_secs: i64) -> 
     // 重新探测而不是复用上面的 `window_pids`：窗口可能是在上一轮探测之后才建出来的。
     let still_windowed = visible_window_pids(&remaining);
     for pid in force_kill_targets(&remaining, &still_windowed) {
-        let pid_s = pid.to_string();
-        if tree_kills_self(pid) {
-            let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s, "/F"], 10);
-        } else {
-            let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
-        }
+        guard.kill(product, pid, true);
     }
     let rest = timeout
         .saturating_sub(started.elapsed())
@@ -254,13 +302,18 @@ pub(crate) fn close_workbuddy_windows(variant: WbVariant, timeout_secs: i64) -> 
     if leftover.is_empty() {
         return Ok(());
     }
-    let product = variant
+    let titles = window_titles(&leftover);
+    Err(close_timeout_error_message(product, &leftover, &titles))
+}
+
+/// 产品名（只用于日志文案）：取该档位第一个映像名，与旧超时文案保持一致。
+#[cfg(target_os = "windows")]
+fn product_name(variant: WbVariant) -> &'static str {
+    variant
         .windows_image_names()
         .first()
         .copied()
-        .unwrap_or("WorkBuddy");
-    let titles = window_titles(&leftover);
-    Err(close_timeout_error_message(product, &leftover, &titles))
+        .unwrap_or("WorkBuddy")
 }
 
 #[cfg(test)]
@@ -292,5 +345,46 @@ mod self_tree_guard_tests {
         );
         assert_eq!(parse_pid_lines(""), Vec::<u32>::new());
         assert_eq!(parse_pid_lines("not-a-pid"), Vec::<u32>::new());
+    }
+
+    /// 命中祖先时必须去掉 `/T`，否则 `taskkill` 会把本进程所在整棵树一起收掉
+    /// （2026-11-28：点「复制并切换」后会话迁移成功但应用闪退）。
+    #[test]
+    fn taskkill_args_drop_tree_flag_only_for_ancestors() {
+        assert_eq!(
+            taskkill_args(4242, false, true),
+            vec!["/PID".to_string(), "4242".to_string()],
+            "命中祖先：不带 /T，也不带 /F"
+        );
+        assert_eq!(
+            taskkill_args(4242, true, true),
+            vec!["/PID".to_string(), "4242".to_string(), "/F".to_string()],
+            "命中祖先且需要强杀：保留 /F，但仍不带 /T"
+        );
+        assert_eq!(
+            taskkill_args(4242, false, false),
+            vec!["/PID".to_string(), "4242".to_string(), "/T".to_string()],
+            "无关进程：保持旧行为"
+        );
+        assert_eq!(
+            taskkill_args(4242, true, false),
+            vec![
+                "/PID".to_string(),
+                "4242".to_string(),
+                "/T".to_string(),
+                "/F".to_string()
+            ],
+            "无关进程 + 强杀：/T 与 /F 都在"
+        );
+    }
+
+    /// 守卫用注入的祖先链判断：命中祖先的 PID 走降级，其余照旧。
+    #[test]
+    fn guard_detects_own_ancestors() {
+        let ancestors = vec![1000, 4242];
+        let args = taskkill_args(4242, false, tree_kill_hits_self(4242, &ancestors));
+        assert!(!args.contains(&"/T".to_string()), "祖先 PID：{args:?}");
+        let args = taskkill_args(9999, false, tree_kill_hits_self(9999, &ancestors));
+        assert!(args.contains(&"/T".to_string()), "无关 PID：{args:?}");
     }
 }
