@@ -2,18 +2,33 @@ name: fork-build
 
 # 本分支自用的 Windows 打包流程（不签名、不发 Release、不 publish npm）。
 # 上游 build.yml 在 fork 中未被 GitHub 注册，因此单独放一份最小可用的。
+#
+# 效率约定（fork 专用，不回流上游）：
+# - 同一分支后一次 push 取消仍在跑的构建：一次构建约 5–12 分钟，连推几次时排队等
+#   旧提交没有意义，产物只会被覆盖。
+# - 只改文档 / 本 workflow 自身时不构建：这些改动进不了安装包。想单独验证 workflow
+#   改动时用 `gh workflow run fork-build.yml -f ...`（或 Actions 页面手动 Dispatch）。
 
 on:
   workflow_dispatch:
   push:
     branches: ["custom/**"]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - ".github/**"
 
 permissions:
   contents: read
 
+concurrency:
+  group: fork-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   win-x64:
     runs-on: windows-latest
+    timeout-minutes: 30
     env:
       AGENT_COMPANION_TARGET: x86_64-pc-windows-msvc
     steps:
@@ -31,20 +46,14 @@ jobs:
           target: x86_64-pc-windows-msvc
           rustflags: ""
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+      # 不再叠一层 actions/cache：上面这个 action 默认已用 Swatinem/rust-cache 缓存
+      # `~/.cargo` 与 `target`（日志里能看到它的 Post 步骤）。两套缓存同时恢复同一份
+      # target 目录，实测多花约 50 秒且互相覆盖 key。
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # bundle 目录在 cargo 缓存里（见上面的 `target`）：不先删，上一个版本的
+      # bundle 目录会随 `target` 一起进 cargo 缓存：不先删，上一个版本的
       # `*-setup.exe` 会留在同一目录，被下面的 glob 一起打进 artifact——
       # 实测 0.5.2 的产物里混进过 0.5.0 的安装包。上游 build.yml 同样在构建前清理。
       - name: Clean previous bundle output

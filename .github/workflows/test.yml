@@ -23,10 +23,10 @@ jobs:
       # 三平台结果一次跑齐：任一平台失败不阻塞其余平台出结果。
       fail-fast: false
       matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-          - windows-latest
+        # fork 的 custom/** 是自定义构建分支（改动集中在 src/ 前端与构建配置），
+        # 三平台矩阵退化为单平台以省 runner 时间；macOS 专属的 ObjC / 插件测试
+        # 仍由 lint job 覆盖，Windows / Linux 的 cfg 分支等主干与 PR 再跑。
+        os: ${{ startsWith(github.ref_name, 'custom/') && fromJSON('["ubuntu-latest"]') || fromJSON('["macos-latest", "ubuntu-latest", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -175,6 +175,9 @@ jobs:
   msrv:
     name: msrv (1.95)
     runs-on: ubuntu-latest
+    # 只守「无意中用上新语法」这一件事：fork 的 custom/** 分支不写 Rust 代码，
+    # 每次 push 都验一遍没有收益，留给主干与 PR。
+    if: ${{ !startsWith(github.ref_name, 'custom/') }}
     steps:
       - uses: actions/checkout@v4
 
