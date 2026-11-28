@@ -28,7 +28,7 @@ import type { SessionGroupClient, WbVariant } from "@/lib/types";
 import * as api from "@/lib/api";
 import { useAccountsStore } from "@/stores/accounts";
 import { AddLinkedSessionDialog } from "./add-linked-session-dialog";
-import { PAGE_SIZE, visibleClients, type SessionClientEntry } from "./constants";
+import { PAGE_SIZE, persistSessionClient, readSessionClientPreference, visibleClients, type SessionClientEntry } from "./constants";
 import { useSupportedTools } from "@/lib/supported-tools";
 import { ScanProgressHint } from "@/components/scan-progress-hint";
 
@@ -73,7 +73,7 @@ function NoEnabledClients() {
 
 function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
   const { accounts, fetchAll } = useAccountsStore();
-  const [clientChoice, setClientChoice] = useState<SessionGroupClient>(clients[0].id);
+  const [clientChoice, setClientChoice] = useState<SessionGroupClient>(readSessionClientPreference);
   // 选中的客户端被关掉时回退到第一个仍启用的，避免留下一个不在标签列表里的选中项。
   const client = clients.some((item) => item.id === clientChoice) ? clientChoice : clients[0].id;
   const [variantScope, setVariantScope] = useState<WbVariant>("cn");
@@ -155,6 +155,7 @@ function SessionsPageContent({ clients }: { clients: SessionClientEntry[] }) {
 
   function changeClient(value: string) {
     const next = value as SessionGroupClient;
+    persistSessionClient(next);
     setClientChoice(next);
     setDetailOpen(false);
     setSelectedGroupId(null);
