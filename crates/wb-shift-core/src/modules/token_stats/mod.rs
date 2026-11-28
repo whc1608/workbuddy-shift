@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::modules::locks;
+use crate::modules::usage_origin::{
+    self, key_of, namespace_for_variant, IdeClientSource, OriginIndex,
+};
 use crate::modules::variant::{HostOs, WbVariant};
 
 /// 某档位的候选 jsonl 根（顺序固定；纯函数，便于单测）。
@@ -208,53 +211,162 @@ fn collect_statistics(home: &Path, days: Option<i64>) -> Value {
     // DB 读不到时返回空表 → 全部「未归属」，绝不阻塞整次统计。
     let cn_uids = session_uid_index_at(&WbVariant::Cn.data_root_at(home));
     let ai_uids = session_uid_index_at(&WbVariant::Ai.data_root_at(home));
+    // R6-07：归属索引每轮**只读一次**，两个 WorkBuddy 来源与三个 IDE 来源共用同一份。
+    // 升级后第一次统计顺带做一次性回填（无 UI 入口、写 `backfilledAt` 后不再重复）。
+    let store_root = usage_origin::store_root_at(home);
+    backfill_once_at(&store_root);
+    let mut attribution = Attribution::new(OriginIndex::load_at(&store_root));
+
+    let workbuddy = source_from_roots(
+        &existing_roots(&roots.workbuddy),
+        "workbuddy",
+        cutoff,
+        false,
+        &cn_uids,
+        &mut attribution,
+        Some(namespace_for_variant(WbVariant::Cn)),
+    );
+    // CN ↔ AI 共用同一份 workbuddy 指纹集合（扫描顺序固定 CN → AI）：跨档位复制/同步的
+    // 同一段历史只计一次，归属取首次命中的段（否则跨档位合计会翻倍）。
+    let workbuddy_ai = source_from_roots(
+        &existing_roots(&roots.workbuddy_ai),
+        "workbuddy-ai",
+        cutoff,
+        false,
+        &ai_uids,
+        &mut attribution,
+        Some(namespace_for_variant(WbVariant::Ai)),
+    );
+    // 请求明细目前只对 CodeBuddy CLI 开放（见 spec 的 requests 契约）。
+    // CLI 日志不按账号分目录、也没有账号字段 → 全部归「未归属」，指纹集合独立
+    // （不记录账号，和 WorkBuddy 共用只会少计）。
+    let cli = source(roots.codebuddy_cli, "codebuddy-cli", cutoff, true);
+    // 第四轮 06：按客户端拆成三个 tab（同一套解析/去重/归因，只是扫描根收窄）。
+    // `WorkBuddy/` 是 WorkBuddy 客户端内置扩展写的空壳，**不扫**：日常用量已经在
+    // 国内版 JSONL 里，扫它会把同一份用量重复计一次。
+    // R6-07：三个 IDE 来源共用一份 ide 指纹集合（同名 ids 不会跨客户端撞车）。
+    let vscode_ext = ide_client_source(
+        roots.codebuddy_ide.clone(),
+        "VSCode",
+        "vscode-ext",
+        cutoff,
+        &ide_projects,
+        &mut attribution,
+    );
+    let jetbrains = ide_client_source(
+        roots.codebuddy_ide.clone(),
+        "JetBrains",
+        "jetbrains",
+        cutoff,
+        &ide_projects,
+        &mut attribution,
+    );
+    let codebuddy_ide = ide_client_source(
+        roots.codebuddy_ide,
+        "CodeBuddyIDE",
+        "codebuddy-ide",
+        cutoff,
+        &ide_projects,
+        &mut attribution,
+    );
+    // 全量统计之后顺带清一次死条目（条目对应的会话在所有客户端都不存在）。
+    attribution.finish(&store_root);
+
     json!({
         "generatedAt": generated_at,
         "rangeDays": range_days,
-        "sources": [
-            source_from_roots(
-                &existing_roots(&roots.workbuddy),
-                "workbuddy",
-                cutoff,
-                false,
-                &cn_uids,
-            ),
-            source_from_roots(
-                &existing_roots(&roots.workbuddy_ai),
-                "workbuddy-ai",
-                cutoff,
-                false,
-                &ai_uids,
-            ),
-            // 请求明细目前只对 CodeBuddy CLI 开放（见 spec 的 requests 契约）。
-            // CLI 日志不按账号分目录、也没有账号字段 → 全部归「未归属」。
-            source(roots.codebuddy_cli, "codebuddy-cli", cutoff, true),
-            // 第四轮 06：按客户端拆成三个 tab（同一套解析/去重/归因，只是扫描根收窄）。
-            // `WorkBuddy/` 是 WorkBuddy 客户端内置扩展写的空壳，**不扫**：日常用量已经在
-            // 国内版 JSONL 里，扫它会把同一份用量重复计一次。
-            ide_client_source(
-                roots.codebuddy_ide.clone(),
-                "VSCode",
-                "vscode-ext",
-                cutoff,
-                &ide_projects,
-            ),
-            ide_client_source(
-                roots.codebuddy_ide.clone(),
-                "JetBrains",
-                "jetbrains",
-                cutoff,
-                &ide_projects,
-            ),
-            ide_client_source(
-                roots.codebuddy_ide,
-                "CodeBuddyIDE",
-                "codebuddy-ide",
-                cutoff,
-                &ide_projects,
-            ),
-        ],
+        "sources": [workbuddy, workbuddy_ai, cli, vscode_ext, jetbrains, codebuddy_ide],
     })
+}
+
+/// 一次性回填的包一层：失败/已回填都不影响统计（`backfill_at` 内部只记日志）。
+fn backfill_once_at(store_root: &Path) {
+    let _ = usage_origin::backfill_at(store_root);
+}
+
+// ---------------------------------------------------------------------------
+// 一次统计内的共享上下文（R6-07）
+// ---------------------------------------------------------------------------
+
+/// WorkBuddy JSONL 记录的指纹：`(时间戳, 输入, 输出, 读, 写, 模型)`。
+///
+/// 副本逐字重放父历史（时间戳与 usage 都不变），所以它可以直接当并集去重的键；
+/// 模型名是 interned 的 `Arc<str>`，建键不额外分配。
+pub(super) type WbFingerprint = (i64, u64, u64, u64, u64, Arc<str>);
+
+/// 一次统计内的共享状态：归属索引 + 存活键 + 两份**跨来源共用**的指纹集合。
+///
+/// 共享是 R6-07 的核心：同一段历史散落在 CN/AI 两个档位（或 IDE 三个客户端）时，
+/// 只有共用指纹集合才能「只计一次、归首次命中的账号」。
+pub(super) struct Attribution {
+    /// 归属索引（每轮只 load 一次，逐条记录按 ts 落段）。
+    pub(super) origin: OriginIndex,
+    /// 本轮在磁盘上真的见到的会话键（GC 用；空集合表示什么都没读到 → 跳过 GC）。
+    pub(super) alive_keys: HashSet<String>,
+    /// WorkBuddy 国内版 + 国际版共用。
+    pub(super) workbuddy_seen: HashSet<WbFingerprint>,
+    /// VS Code / JetBrains / CodeBuddy IDE 三个来源共用。
+    pub(super) ide_seen: HashSet<String>,
+}
+
+impl Attribution {
+    /// 用给定索引开一轮统计。
+    pub(super) fn new(origin: OriginIndex) -> Self {
+        Self {
+            origin,
+            alive_keys: HashSet::new(),
+            workbuddy_seen: HashSet::new(),
+            ide_seen: HashSet::new(),
+        }
+    }
+
+    /// 空上下文（CLI 来源与单测用：没有归属、指纹集合独立）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn empty() -> Self {
+        Self::new(OriginIndex::empty())
+    }
+
+    /// 记一个「这一轮确实存在」的会话键（GC 依据）。
+    pub(super) fn note_alive(&mut self, namespace: &str, session_id: &str) {
+        if !session_id.is_empty() {
+            self.alive_keys.insert(key_of(namespace, session_id));
+        }
+    }
+
+    /// 统计结束：GC 死条目并落盘。
+    ///
+    /// `alive_keys` 为空时**不 GC**：那说明这一轮一个会话都没读到（DB 被锁、目录被删、
+    /// 沙箱为空…），据此删条目会把用户的归属一次性清空。
+    fn finish(&mut self, store_root: &Path) {
+        if self.alive_keys.is_empty() {
+            return;
+        }
+        let removed = self.origin.gc(&self.alive_keys);
+        if removed == 0 {
+            return;
+        }
+        if let Err(error) = self.origin.save_at(store_root) {
+            eprintln!("[usage-origin] 归属索引清理结果保存失败：{error}");
+        }
+    }
+
+    /// 记录级归属：命中段就用段里的 uid，否则回退文件自身 uid。
+    fn uid_for(
+        &self,
+        namespace: &str,
+        session_id: &str,
+        ts: Option<i64>,
+        file_uid: &str,
+    ) -> String {
+        self.origin
+            .attribute(namespace, session_id, ts)
+            .unwrap_or_else(|| file_uid.to_string())
+    }
+
+    /// IDE 来源的命名空间：未知客户端返回 `None`（不做覆盖，回退文件 uid）。
+    fn ide_namespace(client: &str) -> Option<&'static str> {
+        IdeClientSource::from_client_dir(client).map(|source| source.namespace())
+    }
 }
 
 /// 单测用的「完整统计次数」计数器（按 home 路径计数）。
@@ -316,6 +428,7 @@ mod tests {
     include!("tests/detail.rs");
     include!("tests/accounts.rs");
     include!("tests/ide_roots.rs");
+    include!("tests/origin.rs");
     include!("tests/cache.rs");
     include!("tests/memo.rs");
 }

@@ -1735,3 +1735,62 @@ fn three_member_group_is_not_marked_divergent_by_tail_normalization() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// R6-08：同步不搬会话账本（现状保持），复制默认也不搬
+// ---------------------------------------------------------------------------
+
+/// 同步只写正文与 `sessions` 行：两侧账本在同步前后逐字段相同。
+///
+/// R6-07/R6-08 的口径都要求「两个账本各管一件事」——`session_usage` 的数值不参与
+/// Token 归属计算，归属索引也不参与 `session_usage` 的写入。这条用例守的是后半句。
+#[test]
+fn sync_leaves_both_ledgers_untouched() {
+    let env = ready_env("sync-ledger-untouched");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    write_ledger(
+        &db,
+        "sess-1",
+        100,
+        10,
+        r#"{"r1":1.0}"#,
+        &[("req-1", None, None)],
+    );
+    let (group_id, token, target_id) = fast_forward_scene(&env);
+    // 目标账本属于目标账号自己：同步不得搬来源数值，也不得把目标清零。
+    write_ledger(
+        &db,
+        &target_id,
+        7,
+        8,
+        r#"{"r2":3.5}"#,
+        &[("req-9", None, None)],
+    );
+    let source_before = ledger_usage(&db, "sess-1");
+    let target_before = ledger_usage(&db, &target_id);
+    let target_interruptions_before = ledger_interruptions(&db, &target_id);
+
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::FastForward)],
+    );
+    assert_eq!(report["synced"].as_array().unwrap().len(), 1, "{report}");
+
+    assert_eq!(
+        ledger_usage(&db, "sess-1"),
+        source_before,
+        "来源账本不得被同步改写"
+    );
+    assert_eq!(
+        ledger_usage(&db, &target_id),
+        target_before,
+        "同步既不得搬来源账本，也不得清零目标账本"
+    );
+    assert_eq!(
+        ledger_interruptions(&db, &target_id),
+        target_interruptions_before,
+        "同步不得改写目标的中断记录"
+    );
+}

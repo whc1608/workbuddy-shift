@@ -152,6 +152,13 @@ async fn run_one(
     if key.is_empty() {
         return AccountRunResult::unsupported(key, "账号缺少 id/uid，无法记录每日去重状态");
     }
+    // R6-06：信封账号 + 写开关打开时，用本机 live 凭据解出临时副本再跑；
+    // 解不出来才落到下面的信封提示（顺序不能反）。
+    let resolved = crate::modules::at_rest::usable_account(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    );
+    let account = resolved.as_ref().unwrap_or(account);
     if let Some(notice) = envelope_token_error(account) {
         return AccountRunResult::unsupported(key, notice);
     }

@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 
 import { displayName } from "@/lib/account-display";
+import { SESSION_USAGE_ATTRIBUTION } from "@/lib/session-usage-copy";
 import { accountVariant, variantAppName } from "@/lib/variant";
 import type {
   AccountMeta,
@@ -47,6 +48,20 @@ function collectNotes<T>(items: T[], pick: (item: T) => string | undefined): str
   return items
     .map(pick)
     .filter((note): note is string => Boolean(note));
+}
+
+/**
+ * 「副本不含会话用量记录」提示的正文（R6-08）：后端给的逐项说明 + 归属口径。
+ *
+ * 复制**不再搬运历史消耗**（后端 B 方案：谁用的记在谁头上），副本的「共消耗」会显示
+ * 0 或偏少。只报后端的 `auxNote` 不够——用户会以为数据丢了，所以这里一律补上
+ * 「历史消耗归来源账号，副本只记录自己的新增」。
+ *
+ * `notes` 为空时返回空串：调用方据此不弹这条提示（没有异常就不打扰）。
+ */
+export function auxNoteDescription(notes: readonly string[]): string {
+  if (notes.length === 0) return "";
+  return [...notes, SESSION_USAGE_ATTRIBUTION].join("；");
 }
 
 interface SwitchResultContext {
@@ -131,12 +146,14 @@ export function notifySwitchResult({
   if (spaceNotes.length > 0) {
     toast.warning("会话的项目分组需要留意", { description: spaceNotes.join("；") });
   }
-  // 账本：目标客户端缺表/缺列时副本不含用量记录（「共消耗」会偏少），同样不算失败。
+  // 账本：目标客户端缺表/缺列时副本不含用量记录。R6-08 起复制默认就不搬历史消耗，
+  // 所以这里补一句归属口径——否则用户会以为副本的「共消耗」是丢了数据。
   const auxNotes = summarizeNotes(
     collectNotes(copyReport?.copied ?? [], (item) => item.auxNote),
   );
-  if (auxNotes.length > 0) {
-    toast.warning("副本不含会话用量记录", { description: auxNotes.join("；") });
+  const auxDescription = auxNoteDescription(auxNotes);
+  if (auxDescription) {
+    toast.warning("副本不含会话用量记录", { description: auxDescription });
   }
   // 同步结果：成功、跳过、失败与恢复信息都要能看到，不能只显示成功数。
   const groupLabel = (groupId: string) =>

@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::modules::at_rest;
+
 /// 旧资源接口路径后缀（按档位生成完整候选，见 `WbVariant::billing_paths`）。
 pub(super) const USER_RESOURCE_SUFFIX: &str = "/get-user-resource";
 pub(super) const WORKBUDDY_WEB_ENDPOINT: &str = "https://www.workbuddy.cn";
@@ -130,9 +132,23 @@ pub(super) fn is_transport_error(response: &Value) -> bool {
 /// 新鲜，遇到未授权时使用 refresh token 重试一次。调用方只拿到上游 JSON，
 /// 不会把认证字段拼进返回值。
 pub async fn authenticated_post(account: &Value, url: &str, body: Value) -> Value {
-    // 加密信封凭据短路：不发空 Bearer，直接给出可读错误（issue #94）。
-    if let Some(err) = envelope_token_error(account) {
-        return json!({"code": -2, "message": err});
+    // R6-06：先尝试用本机 live 凭据解出临时副本（信封账号 + 只读开关打开时才生效）；
+    // 解不出来才回退信封提示（issue #94 的文案与形状逐字不变）。
+    let resolved = match at_rest::resolve_or_envelope_error(account, at_rest::AccessMode::ReadOnly)
+    {
+        Ok(temp) => temp,
+        Err(err) => return json!({"code": -2, "message": err}),
+    };
+    let account = resolved.as_ref().unwrap_or(account);
+    if at_rest::is_temp(account) {
+        // 临时副本没有 refresh token：401 时只重读 live 一次，**绝不**调刷新接口。
+        let mut response = post_with_account(account, url, body.clone()).await;
+        if is_unauthorized(&response) {
+            if let Some(fresh) = at_rest::reread_after_unauthorized(account) {
+                response = post_with_account(&fresh, url, body).await;
+            }
+        }
+        return response;
     }
     let config = load_checkin_config();
     let mut working_account = ensure_fresh_token(account.clone(), &config).await;

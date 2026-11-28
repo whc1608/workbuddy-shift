@@ -99,6 +99,19 @@ pub(crate) fn copy_sessions_in_with(
 
     let mut errors: Vec<Value> = Vec::new();
 
+    // R6-07 写入点 3/4：插件/IDE **复制**的归属交接。boundary 在函数开头取一次，
+    // 整批条目共用同一个时刻——它们都是「本次批量复制」的产物，同一批里先后差几毫秒
+    // 没有语义（段的边界只用来区分「复制前的历史」与「复制后的新增」）。
+    let origin_boundary_ms = crate::modules::config::now_ms();
+    // 命名空间与读侧共用同一份映射（`VSCode → ide:vscode` 等）；未知客户端不记索引。
+    let origin_namespace =
+        crate::modules::usage_origin::IdeClientSource::from_client_dir(spec.client_dir)
+            .map(|client| client.namespace());
+    // 索引落在工具存储根下：由备份根（`<store>/backups/<kind>/<iso>`）反推。
+    // 反推不出来（测试注入的临时备份目录）就整块跳过——宁可不写，也不把索引写到
+    // 不相干的目录里去污染用户真实存储。
+    let origin_store_root = crate::modules::usage_origin::store_root_from_backup_root(backup_root);
+
     // 阶段 1：逐条校验并解析目标位置（不写盘）。
     let mut prepared: Vec<PreparedCopy> = Vec::with_capacity(items.len());
     let mut missing_projects: Vec<String> = Vec::new();
@@ -197,6 +210,23 @@ pub(crate) fn copy_sessions_in_with(
             state,
         ) {
             Ok(mut outcome) => {
+                // R6-07：副本继承了来源的整份历史，必须把「边界之前归来源账号」写进
+                // 归属索引；否则副本一旦被继续使用，mtime 反超来源，历史就翻到副本账号。
+                // 失败只记日志（`record_copy_quiet` 签名里没有 `Result`），绝不影响复制结果。
+                if let (Some(namespace), Some(store_root)) = (origin_namespace, &origin_store_root)
+                {
+                    if let Some(new_id) = outcome.get("newId").and_then(Value::as_str) {
+                        crate::modules::usage_origin::record_copy_quiet(
+                            store_root,
+                            namespace,
+                            new_id,
+                            namespace,
+                            &item.conversation_id,
+                            origin_boundary_ms,
+                            source_uid,
+                        );
+                    }
+                }
                 // 项目 key 只在多项目数据仓里回给调用方（VS Code 系报告形状保持不变）。
                 if spec.scope == ScopeSegment::ProjectKey {
                     outcome["projectKey"] = json!(item.target_project_key);

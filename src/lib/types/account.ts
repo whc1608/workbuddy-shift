@@ -66,6 +66,15 @@ export type LastUsedClient =
   | "cli"
   | "rotate";
 
+/**
+ * 凭据形态（R6-02）：只描述**类型**，永远不含凭据值。
+ *
+ * - `plain`：账号库里是明文 access / refresh token，本工具可直接使用；
+ * - `envelope`：账号库里是 WorkBuddy 的加密信封，本工具读不到明文（可用本机客户端凭据读取）；
+ * - `missing`：没有任何可用凭据（需要重新登录）。
+ */
+export type CredentialKind = "plain" | "envelope" | "missing";
+
 export interface AccountMeta {
   id: string;
   uid: string | null;
@@ -89,6 +98,13 @@ export interface AccountMeta {
   createdAt: number | null;
   needsRelogin: boolean;
   needsReloginReason: string | null;
+  /**
+   * 凭据形态（R6-02）：见 `CredentialKind`。**可选**——旧后端与历史快照都没有该字段，
+   * 缺省（`undefined`）按「形态未知」处理，卡片行为与改造前完全一致（不报错、不空白）。
+   *
+   * 信封账号（`envelope`）不再显示「需重新登录」：它没坏，只是本工具读不到明文。
+   */
+  credentialKind?: CredentialKind;
   /**
    * 本次刷新「被跳过」的机器可读标记（issue #202）；只有真的跳过时才出现。
    *

@@ -170,6 +170,24 @@
     }
 
     #[test]
+    fn fallback_candidates_include_drive_root_install() {
+        // 便携版：D:\WorkBuddy\WorkBuddy.exe（既不在 Program Files，也不在 LOCALAPPDATA）。
+        let cands = windows_fallback_exe_candidates(
+            Some(r"C:\Users\Zhou\AppData\Local"),
+            Some(r"C:\Program Files"),
+            None,
+            Some("Zhou"),
+            &['C', 'D'],
+            WbVariant::Cn,
+        );
+        let want = r"D:\WorkBuddy\WorkBuddy.exe";
+        assert!(
+            cands.iter().any(|p| p.to_string_lossy() == want),
+            "missing {want} in {cands:?}"
+        );
+    }
+
+    #[test]
     fn ai_fallback_candidates_stay_within_variant() {
         let cands = windows_fallback_exe_candidates(
             Some(r"C:\Users\Zhou\AppData\Local"),

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { SESSION_USAGE_ATTRIBUTION } from "@/lib/session-usage-copy";
 import type { AccountMeta, Session, SessionCopyReport, SwitchResult } from "@/lib/types";
 
 import { notifySwitchResult } from "./result-notice";
@@ -219,14 +220,17 @@ describe("notifySwitchResult：项目归属与账本说明", () => {
     expect(warningWith(SPACE_TITLE)?.description).toBe(`${note}（2 个会话）`);
   });
 
-  it("有 auxNote 时单独提示「副本不含用量记录」", () => {
+  it("有 auxNote 时单独提示「副本不含用量记录」，并带上归属口径（R6-08）", () => {
     const note = "目标客户端不支持会话用量记录，副本不含账本";
     notifySessionCopy({
       copied: [itemWithNotes("sess-1", { auxNote: note })],
       alreadyLinked: [],
     });
 
-    expect(warningWith(AUX_TITLE)?.description).toBe(note);
+    const description = warningWith(AUX_TITLE)?.description ?? "";
+    // 后端说明原样保留，**并且**补上归属口径：否则用户会以为副本丢了数据。
+    expect(description).toContain(note);
+    expect(description).toContain(SESSION_USAGE_ATTRIBUTION);
   });
 
   it("修复、项目归属、账本三类说明并存时互不覆盖", () => {
@@ -240,7 +244,7 @@ describe("notifySwitchResult：项目归属与账本说明", () => {
 
     expect(warningWith(REPAIR_TITLE)?.description).toBe(repaired);
     expect(warningWith(SPACE_TITLE)?.description).toBe(space);
-    expect(warningWith(AUX_TITLE)?.description).toBe(aux);
+    expect(warningWith(AUX_TITLE)?.description).toContain(aux);
     expect(toastMock.success).toHaveBeenCalledTimes(1);
   });
 });

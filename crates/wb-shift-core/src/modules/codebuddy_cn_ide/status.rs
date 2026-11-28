@@ -454,6 +454,6 @@ pub fn detect_current_account() -> Result<Value, String> {
         "found": true,
         "matched": false,
         "uid": uid,
-        "message": "本机已登录 CodeBuddy CN，但账号库中无匹配账号；可先用「从本机导入」或扫码登录同步账号后再切换。",
+        "message": "本机已登录 CodeBuddy CN，但账号库中无匹配账号；请用该账号重新 OAuth 扫码登录后再切换。",
     }))
 }

@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { ArrowRight, Check, ChevronDown, ChevronLeft, Copy, Ellipsis, FileText, Folder, Info, Link2, Loader2, Plus, RefreshCw, TriangleAlert, Unlink, X } from "lucide-react";
 import { DemoAction } from "@/components/demo-action";
+import { MessagePreview } from "@/components/message-preview";
 import { CodeBuddyAiIdeMark, CodeBuddyCnIdeMark, VscodeExtAiMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
@@ -301,9 +302,17 @@ export function GroupDetailPanel(props: GroupDetailPanelProps) {
                       <div className="flex flex-wrap items-center justify-between gap-x-2"><p className="text-[11px] text-muted-foreground">{formatDateTime(member.updatedAt, "更新时间未知")}</p><CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-5 gap-0.5 px-0 text-[11px] text-primary">{member.canBeSource ? "查看内容" : "副本详情"}<ChevronDown className="size-3" /></Button></CollapsibleTrigger></div>
                       <CollapsibleContent className="space-y-1.5 py-1.5 text-[11px] leading-4 text-muted-foreground">
                         {/* 最近内容不再只在「有分歧」时出现：`canBeSource` == 副本可读（`active` 且正文已就绪），
-                            内容一致时同样该能一眼看到「这条会话聊了什么」，否则用户只能靠打开对应客户端确认。 */}
-                        {member.canBeSource && <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-md bg-muted/60 p-2">
-                          {member.contentPreview?.length ? <><p>最近 {member.contentPreview.length} 条可读内容：</p>{member.contentPreview.map((item, previewIndex) => <p key={previewIndex} className="break-words"><span className="font-medium text-foreground">{item.speaker}：</span>{item.text}</p>)}</> : <p>此副本暂无可展示的内容预览，请在对应客户端查看完整会话。</p>}
+                            内容一致时同样该能一眼看到「这条会话聊了什么」，否则用户只能靠打开对应客户端确认。
+                            `max-h-56`：表格（表头 + 2~3 行）比纯文本占地方，44 只能看到半张表。 */}
+                        {member.canBeSource && <div className="max-h-56 space-y-2 overflow-y-auto rounded-md bg-muted/60 p-2">
+                          {member.contentPreview?.length ? <><p>最近 {member.contentPreview.length} 条可读内容：</p>{member.contentPreview.map((item, previewIndex) => (
+                            // speaker 单独一行：正文按 Markdown 渲染（表格 / 代码 / 列表），
+                            // 与说话人混在同一段会让首件块状内容和名字挤在一行。
+                            <div key={previewIndex} className="min-w-0 space-y-1">
+                              <p className="break-words font-medium text-foreground">{item.speaker}：</p>
+                              <MessagePreview text={item.text} />
+                            </div>
+                          ))}</> : <p>此副本暂无可展示的内容预览，请在对应客户端查看完整会话。</p>}
                         </div>}
                         <p className="break-words">{member.projectLabel || "未标记工作区"}</p><p className="break-words">{member.reason}</p>
                       </CollapsibleContent>

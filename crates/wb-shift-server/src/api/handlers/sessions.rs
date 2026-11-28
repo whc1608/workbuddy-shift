@@ -185,3 +185,35 @@ pub(crate) async fn api_session_sync_cross(
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }
+
+/// GET /api/session-writes/pending —— 未完成的会话写入（只读）。
+///
+/// 操作目录跨档共用，档位只影响标题解析（core 内按操作自身的 `variant` 处理），
+/// 因此这里固定用任一档位构造存储路径。
+pub(crate) async fn api_pending_session_writes() -> Response {
+    let paths = session::SessionPaths::for_variant(WbVariant::Cn);
+    match session::pending_session_operations(&paths) {
+        Ok(items) => json_ok(json!({ "items": items })),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/session-writes/discard —— 结束一次未完成的同步写入。
+///
+/// 只改操作记录：不碰正文、不碰目标会话行；目标内容可能被改写时保留备份并如实返回。
+pub(crate) async fn api_discard_session_write(
+    body: Result<Json<SessionWriteDiscardRequest>, JsonRejection>,
+) -> Response {
+    let request = match parse_body(body) {
+        Ok(request) => request,
+        Err(rejection) => return invalid_body(rejection),
+    };
+    if request.operation_id.trim().is_empty() {
+        return json_err("缺少 operationId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let paths = session::SessionPaths::for_variant(WbVariant::Cn);
+    match session::discard_unfinished_sync(&paths, &request.operation_id) {
+        Ok(result) => json_ok(json!(result)),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}

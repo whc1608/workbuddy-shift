@@ -36,6 +36,9 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod win_close;
 mod windows;
+// 客户端版本读取的唯一实现（诊断包与 R6-06 平台闸门共用）。
+mod version;
+pub use version::client_version;
 
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::extract_app_bundle_from_args;

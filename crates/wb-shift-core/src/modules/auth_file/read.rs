@@ -257,6 +257,10 @@ pub(super) fn imported_account_from_root(root: Value, variant: WbVariant) -> Opt
         "nickname": nickname,
         "email": email,
         "variant": variant.as_str(),
+        // 凭据来源（R6-01）：从本机登录态采集所得，与客户端共用同一个 refresh 会话，
+        // 因此 live 出现加密信封时**不许**用库里的旧 RT 去刷新（会把客户端顶掉）。
+        // 键名必须与 `account::CREDENTIAL_SOURCE_FIELD` 逐字一致（`json!` 只接受字面量键）。
+        "credentialSource": crate::modules::account::CredentialSource::Local.as_str(),
         "enterpriseName": get_str(&root, "enterpriseName")
             .or_else(|| get_str(&root, "enterprise_name"))
             .or_else(|| get_str(&account_obj, "enterpriseName"))

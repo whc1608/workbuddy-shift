@@ -24,15 +24,31 @@ pub(super) fn skips_refresh_before_retry(variant: WbVariant, resp: &Value) -> bo
 
 /// 发单次签到请求；遇到未授权且存在 refresh token 时刷新一次并重试。
 pub(super) async fn checkin_request_once(path: &str, account: &Value, variant: WbVariant) -> Value {
-    // 加密信封凭据短路：不发空 Bearer，直接给出可读错误（issue #94）。
-    if let Some(err) = envelope_token_error(account) {
-        return json!({"code": -2, "message": err});
-    }
+    // R6-06：先尝试用本机 live 凭据解出临时副本（写开关打开时才生效）；
+    // 解不出来才回退信封提示（issue #94 的文案与形状逐字不变）。
+    let resolved = match crate::modules::at_rest::resolve_or_envelope_error(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    ) {
+        Ok(temp) => temp,
+        Err(err) => return json!({"code": -2, "message": err}),
+    };
+    let account = resolved.as_ref().unwrap_or(account);
     let url = format!("{}{path}", variant.api_endpoint());
     let headers = build_auth_headers(account);
     let mut resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
     // 国际版「未开放 / 已过期」类业务码：直接返回，绝不刷新、绝不重试。
     if skips_refresh_before_retry(variant, &resp) {
+        return resp;
+    }
+    if crate::modules::at_rest::is_temp(account) {
+        // 临时副本的令牌来自客户端：401 只重读 live 一次，**绝不**调刷新接口。
+        if is_unauthorized(&resp) {
+            if let Some(fresh) = crate::modules::at_rest::reread_after_unauthorized(account) {
+                let headers = build_auth_headers(&fresh);
+                resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
+            }
+        }
         return resp;
     }
     if is_unauthorized(&resp)

@@ -16,11 +16,13 @@ function interfaceLocale(): string {
 /**
  * 生成脱敏诊断包（只读）。
  *
- * 网页版与桌面端同源：桌面走 invoke、网页走 `GET /api/diagnostics`，
- * 报告内容由同一份 core 代码产出。
+ * `force=true` 跳过宿主侧 30s 探测缓存（「重新生成」用）。
  */
-export function getDiagnosticsReport(): Promise<DiagnosticsReport> {
-  return call<DiagnosticsReport>("get_diagnostics_report", { locale: interfaceLocale() });
+export function getDiagnosticsReport(force = false): Promise<DiagnosticsReport> {
+  return call<DiagnosticsReport>("get_diagnostics_report", {
+    locale: interfaceLocale(),
+    force,
+  });
 }
 
 /**
@@ -28,9 +30,10 @@ export function getDiagnosticsReport(): Promise<DiagnosticsReport> {
  *
  * 内容由宿主重新生成，不接受前端回传文本，因此这条命令无法被当成通用写文件通道。
  */
-export function exportDiagnostics(path: string): Promise<DiagnosticsExportResult> {
+export function exportDiagnostics(path: string, force = false): Promise<DiagnosticsExportResult> {
   return call<DiagnosticsExportResult>("export_diagnostics", {
     path,
     locale: interfaceLocale(),
+    force,
   });
 }

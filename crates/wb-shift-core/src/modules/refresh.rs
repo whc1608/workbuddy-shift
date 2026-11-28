@@ -37,16 +37,71 @@
 //!
 //! 结果通过**只在内存里**的 `refresh_outcome` 字段回传给保活循环（[`refresh_outcome`]），
 //! 它永远不进账号库：所有写入都在 `upsert_account` 之后才插入。
+//!
+//! # 4. 加密信封永不覆盖明文（R6-01）
+//!
+//! WorkBuddy 5.6 起客户端把 token 换成 `$wbEncrypted` 加密信封。T01 的 adopt 只判
+//! 「同 uid + 值不同 + live 更新」，于是**信封被当成「更新的凭据」回填账号库**，把 OAuth
+//! 扫码得到的明文覆盖掉；之后积分/签到/旅行全部短路，重登后客户端再续期又复发。
+//!
+//! 现在 [`decide_live_action`] 在 `differs_from` / `newer_than` **之前**先判信封，并按
+//! 账号的凭据来源（[`crate::modules::account::credential_source`]）分流：
+//!
+//! | live access token | 账号库现状 | 来源 | 动作 | 内存 outcome |
+//! | --- | --- | --- | --- | --- |
+//! | 明文 | 任意 | 任意 | 照旧 adopt / 刷新 | `adopted` / `refreshed` |
+//! | 信封 | 明文未过期 | 任意 | [`LiveAction::KeepPlaintext`] | `kept_plaintext` |
+//! | 信封 | 明文已过期 / 无明文 | `oauth` | 照常刷新（独立会话） | `refreshed` |
+//! | 信封 | 明文已过期 / 无明文 | `local` / `import` / 判不出 | [`LiveAction::SkipEncrypted`] | `skipped_encrypted` |
+//! | 信封 | 已是信封 | 任意 | 跳过，不重复写 | `skipped_encrypted` |
+//!
+//! 两条跳过分支**只写内存 outcome**：不 `upsert_account`、不写 `needs_relogin`、不发请求。
+//! [`apply_live_credentials`] 另有第二道闸（信封不许覆盖明文字符串），防止将来新增调用点
+//! 绕过 [`decide_live_action`]。
+//!
+//! # 5. 信封 refresh token 不再被当成「缺少 refresh token」（R6-02）
+//!
+//! 信封账号的 `refresh_token` 是对象，`as_str()` 取不到 → 旧实现走「缺 refresh token」
+//! 分支，每次启动/保活都补一条**误导性**的「需重新登录」。现在在判空**之前**先判信封
+//! （[`has_envelope_credential`]，`access_token` 或 `refresh_token` 任一为信封即命中）：
+//! 不写标记、不改库、0 请求，保活计 `skipped` 而不是 `failed`。
+//!
+//! 历史上已经被误标的账号在下一次刷新/保活路径上**惰性清理**（[`clear_mislabeled_relogin`]）：
+//! 只认工具自己生成的两条文案（逐字匹配）且当前确实是信封，其它原因（服务端吊销）一律
+//! 不动；不做启动时批量迁移，避免升级后一次性写全库。
+//!
+//! # 6. `__at_rest` 临时副本绝不刷新（R6-06 契约，由本文件提供守卫）
+//!
+//! R6-06 解密通道拿到的是**临时账号副本**，内存里带 `"__at_rest": true`。用它去刷新会
+//! 用解密出的 refresh token 轮换掉客户端手里的令牌，导致客户端掉登录。因此
+//! [`is_at_rest_temp`] 命中时 [`ensure_fresh_token`] / [`refresh_account_token`]
+//! **入口第一步**就返回（outcome `skipped_at_rest`），[`run_keepalive_cycle`] 直接跳过。
+//!
+//! 该标记**只存在于内存**：禁止落盘、禁止进 DTO / 诊断 / 日志，也禁止进
+//! `upsert_account` / `apply_live_credentials`。
+//!
+//! # 7. 凭据事件（R6-01/R6-03 契约）
+//!
+//! 每个决策点都往 [`crate::modules::credential_events`] 记一条（action 与 `refresh_outcome`
+//! 同名，同账号同 action 60s 节流）。诊断包读那 200 条环形日志；桌面 App 没有控制台，
+//! 只靠 `eprintln!` 等于不留痕。
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use crate::modules::account::{account_meta, build_auth_headers, secret_value, upsert_account};
+use crate::modules::account::{
+    account_meta, build_auth_headers, credential_source, has_unexpired_plain_token, is_envelope,
+    is_envelope_value, secret_value, upsert_account,
+};
 use crate::modules::auth_file;
 use crate::modules::config::{
     http_request, is_html_failure, load_checkin_config, norm_ts, now_ms, RunFlagGuard,
+};
+use crate::modules::credential_events::{
+    self, ACTION_ADOPTED, ACTION_KEPT_PLAINTEXT, ACTION_REFRESHED, ACTION_REFRESH_FAILED,
+    ACTION_SKIPPED_ENCRYPTED, REASON_INVALID_GRANT, REASON_MISSING_REFRESH_TOKEN, REASON_OK,
 };
 use crate::modules::variant::WbVariant;
 
@@ -84,7 +139,7 @@ const REFRESH_SKIPPED_LOCK_BUSY: &str = "credential_lock_busy";
 /// 本次刷新的**机器可读结果**字段名（**只存在于内存，从不落盘**）。
 ///
 /// 与 [`REFRESH_SKIPPED_FIELD`] 的分工：那个字段只表示「抢不到锁 ⇒ 这次没刷新」，
-/// 是给宿主做响应投影用的稳定契约；本字段是**诊断**用的四值词表，覆盖「走了哪条路径」。
+/// 是给宿主做响应投影用的稳定契约；本字段是**诊断**用的词表，覆盖「走了哪条路径」。
 const REFRESH_OUTCOME_FIELD: &str = "refresh_outcome";
 /// 采用 live 认证文件的新凭据（没有发刷新请求、没有写 live 文件）。
 const REFRESH_OUTCOME_ADOPTED: &str = "adopted";
@@ -94,14 +149,49 @@ const REFRESH_OUTCOME_REFRESHED: &str = "refreshed";
 const REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE: &str = "skipped_live_unreadable";
 /// 抢不到 `credentials.lock`：本次跳过。
 const REFRESH_OUTCOME_SKIPPED_CREDENTIAL_LOCK: &str = "skipped_credential_lock";
+/// live 是加密信封、账号库明文仍有效：保留明文（不回填、不发请求、不落盘，R6-01）。
+const REFRESH_OUTCOME_KEPT_PLAINTEXT: &str = "kept_plaintext";
+/// 凭据是加密信封且不该刷新（来源非 oauth / 库内已是信封）：不发请求、不改库（R6-01/R6-02）。
+const REFRESH_OUTCOME_SKIPPED_ENCRYPTED: &str = "skipped_encrypted";
+/// R6-06 的临时账号副本（`__at_rest`）：绝刷新（会轮换掉客户端手里的令牌）。
+const REFRESH_OUTCOME_SKIPPED_AT_REST: &str = "skipped_at_rest";
 
 /// 本次刷新的机器可读结果；不是本文件产出的对象（或没走到刷新）时返回 `None`。
 ///
-/// 取值是上面四个 `REFRESH_OUTCOME_*` 常量。标记只在返回值里，`upsert_account` 之后
-/// 才插入，因此**不会**出现在账号库里（单测 `adopt_when_live_credentials_are_newer`
-/// 同时断言这一点）。
+/// 取值是上面全部 `REFRESH_OUTCOME_*` 常量，即：
+///
+/// - `adopted`：采用 live 快照，没发请求；
+/// - `refreshed`：走完了刷新路径（成功与否看标记字段）；
+/// - `kept_plaintext`：live 是信封、库内明文仍可用，保留明文（R6-01）；
+/// - `skipped_encrypted`：凭据是信封且不该刷新（R6-01 / R6-02）；
+/// - `skipped_live_unreadable`：live 文件存在但读不出来（可能在写）；
+/// - `skipped_credential_lock`：抢不到凭据写入锁；
+/// - `skipped_at_rest`：R6-06 的临时账号副本，禁止刷新。
+///
+/// 标记只在返回值里，`upsert_account` 之后才插入，因此**不会**出现在账号库里（单测
+/// `adopt_when_live_credentials_are_newer` 同时断言这一点）。
 pub fn refresh_outcome(account: &Value) -> Option<&str> {
     account.get(REFRESH_OUTCOME_FIELD).and_then(Value::as_str)
+}
+
+/// 内存字段名：R6-06 解密出的**临时账号副本**标记（只存在于内存）。
+///
+/// 该标记不得落盘、不得进 DTO / 诊断 / 日志；也不是账号库字段（账号库里出现它说明有人
+/// 把临时副本写回了，属于事故）。名字带 `__` 前缀是为了在任何序列化/诊断投影里一眼看出
+/// 「这是内部标记、不是账号数据」。
+///
+/// 对外公开是为了让 A 轨（R6-06 解密通道）打标记与这里判标记用**同一个**字符串：
+/// 硬编码 `"__at_rest"` 会在改名时静默失配——守卫读不到标记就等于守卫不存在，而那时
+/// 临时副本会被真的拿去刷新、把客户端的 refresh token 轮换掉。
+pub const AT_REST_FIELD: &str = "__at_rest";
+
+/// 该账号是否为 R6-06 解密通道产出的**临时副本**（见 [`AT_REST_FIELD`]）。
+///
+/// 守卫语义：临时副本的 token 是本次请求临时解密出来的，用它去打刷新接口会把客户端
+/// 手里的 refresh token 轮换掉（客户端直接掉登录）。因此刷新链路上见到它一律**不刷新**。
+/// A 轨只调用本函数，不修改 `refresh.rs`。
+pub fn is_at_rest_temp(account: &Value) -> bool {
+    account.get(AT_REST_FIELD).and_then(Value::as_bool) == Some(true)
 }
 
 /// 本次刷新是否因为抢不到凭据写入锁而被跳过（该标记只在内存里，从不落盘）。
@@ -422,6 +512,70 @@ fn clear_relogin_marker(account: &mut Value) {
             map.remove(key);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// R6-01 / R6-02：客户端加密信封凭据
+// ---------------------------------------------------------------------------
+
+/// 账号的凭据里是否有加密信封（`access_token` **或** `refresh_token` 是信封对象）。
+///
+/// R6-02 的判据就是它：信封的 `refresh_token` 是对象，`as_str()` 取不到 → 旧实现误判成
+/// 「缺少 refresh token」并写「需重新登录」。两个字段都要认——只判 `refresh_token` 会漏掉
+/// 「access 是信封、refresh 缺失」这种形态，只判 `access_token` 会漏掉反向形态。
+fn has_envelope_credential(account: &Value) -> bool {
+    is_envelope(account, "refresh_token") || is_envelope(account, "access_token")
+}
+
+/// 工具自己生成的「缺少 refresh token」文案（R6-02 历史误标**逐字**匹配表）。
+///
+/// 两条分别来自 `refresh_account_token`（刷新）与 `run_keepalive_cycle`（保活）。
+/// 只有**逐字相等**才允许清理：服务端吊销也有自己的文案（`续期被拒（code=…）`），
+/// 放宽成「包含关键词」会误清真实吊销标记。
+const MISLABELED_RELOGIN_REASONS: [&str; 2] = [
+    "缺少 refresh token，无法刷新，需重新登录",
+    "缺少 refresh token，无法保活，需重新登录",
+];
+
+/// 惰性清理 R6-02 的历史误标：**只有**「带标记 + 原因逐字匹配 + 当前确实是信封」三条
+/// 同时成立才清，返回是否真的清过（调用方据此决定要不要落盘）。
+///
+/// 时机是「该账号下一次刷新/保活」，不做启动时批量迁移：升级后一次性写全库既有风险
+/// （写坏账号库代价远高于晚清一条标记），也会把用户没在用的账号无谓唤醒。
+fn clear_mislabeled_relogin(account: &mut Value) -> bool {
+    if !has_relogin_marker(account) {
+        return false;
+    }
+    let reason = account
+        .get("needs_relogin_reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !MISLABELED_RELOGIN_REASONS.contains(&reason) {
+        return false;
+    }
+    if !has_envelope_credential(account) {
+        // 明文账号上的「缺少 refresh token」可能是真的（RT 被删/被吊销），保留标记。
+        return false;
+    }
+    clear_relogin_marker(account);
+    true
+}
+
+/// 信封凭据的统一返回值：**不落库、不发请求、不写标记**，只带内存 outcome。
+///
+/// 唯一的例外是 R6-02 的惰性清理：那一支确实要写库（清历史误标），因此单独落盘一次。
+/// 注意本函数**不**持 `credentials.lock`：它没有网络请求、也不改凭据，抢锁只会把切号
+/// 与真正的刷新挡在门外。
+fn skip_encrypted_credential(mut account: Value) -> Value {
+    let cleaned = clear_mislabeled_relogin(&mut account);
+    if cleaned {
+        eprintln!("[refresh] 清理历史误标：信封凭据不再算「缺少 refresh token」");
+        let _ = upsert_account(&account);
+    }
+    account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_ENCRYPTED);
+    credential_events::record_for_account(&account, ACTION_SKIPPED_ENCRYPTED, REASON_OK);
+    eprintln!("[refresh] 跳过刷新：凭据为客户端加密信封态（不改库、不发请求）");
+    account
 }
 
 // ---------------------------------------------------------------------------
@@ -829,11 +983,21 @@ enum LiveAction {
     Adopt(LiveCredentials),
     /// live 文件存在但读不出来：本次跳过（不改库、不发请求、不写 `needs_relogin`）。
     SkipUnreadable,
+    /// live 是加密信封、账号库里的明文仍有效：**保留明文**，不回填、不发请求、不落盘（R6-01）。
+    KeepPlaintext,
+    /// live 是加密信封且不该刷新（来源非 `oauth`，或库内已经是信封）：不发请求、不改库（R6-01）。
+    SkipEncrypted,
     /// 与改造前一致：照常刷新。
     RefreshAsBefore,
 }
 
-/// 判定本次该 adopt / 跳过 / 照旧刷新（整段判定必须在锁内做，理由见调用点）。
+/// 判定本次该 adopt / 保留明文 / 跳过 / 照旧刷新（整段判定必须在锁内做，理由见调用点）。
+///
+/// # 信封闸门的位置（R6-01，不得后移）
+///
+/// 旧实现只判「同 uid + 值不同 + live 更新」就 adopt，于是 `$wbEncrypted` 信封被当成
+/// 「更新的凭据」回填账号库、覆盖掉 OAuth 明文。信封判定必须排在 `differs_from`
+/// **之前**：信封与明文字符串必然「不同」，也往往「更新」，走到后面就已经来不及了。
 fn decide_live_action(account: &Value, variant: WbVariant) -> LiveAction {
     let live = match read_live_auth_state(variant) {
         // 没有 live 文件 = 该档位没有登录的官方客户端 = 没有「当前账号」。
@@ -849,6 +1013,25 @@ fn decide_live_action(account: &Value, variant: WbVariant) -> LiveAction {
     let Some(credentials) = LiveCredentials::from_auth_file(&live) else {
         return LiveAction::RefreshAsBefore;
     };
+    // ── 信封闸门（R6-01）：优先级高于「不同 / 更新」两项判据 ─────────────────
+    // `credentials.access_token` 已由 `from_auth_file` 覆盖 `auth.accessToken` 与顶层
+    // `accessToken` 两个根，因此这里判一次就够。
+    if is_envelope_value(&credentials.access_token) {
+        if is_envelope(account, "access_token") {
+            // 库里已经是信封：再写一次没有任何信息增量，只会白白重排 JSON。
+            return LiveAction::SkipEncrypted;
+        }
+        if has_unexpired_plain_token(account) {
+            // 明文还能用：信封一点价值都没有（还要靠客户端 keyblob 才能解），直接保留明文。
+            return LiveAction::KeepPlaintext;
+        }
+        // 明文已过期 / 没有明文：只有 OAuth 独立会话允许照常刷新；`local` / `import` /
+        // 判不出一律跳过——拿库里的旧 refresh token 去刷会把客户端手里的令牌轮换掉。
+        return match credential_source(account) {
+            source if source.may_refresh_on_envelope() => LiveAction::RefreshAsBefore,
+            _ => LiveAction::SkipEncrypted,
+        };
+    }
     if !credentials.differs_from(account) {
         return LiveAction::RefreshAsBefore;
     }
@@ -864,7 +1047,21 @@ fn decide_live_action(account: &Value, variant: WbVariant) -> LiveAction {
 }
 
 /// 把 live 快照回填到账号记录（纯内存；落盘由调用方 `upsert_account` 负责）。
+///
+/// # 防御纵深（R6-01）
+///
+/// 入口再判一次「live 是信封、账号是明文字符串 → 一个字段都不写」。`decide_live_action`
+/// 已经挡住了这条路，这里是第二道闸：将来若有新调用点（例如 R6-06 的回填写回）绕过判定
+/// 直接调本函数，也不会把明文覆盖成信封。
 fn apply_live_credentials(account: &mut Value, credentials: &LiveCredentials) {
+    let stored_plain = match account.get("access_token") {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        _ => false,
+    };
+    if is_envelope_value(&credentials.access_token) && stored_plain {
+        eprintln!("[refresh] 拒绝用加密信封覆盖账号库明文（防御分支，未写入任何字段）");
+        return;
+    }
     account["access_token"] = credentials.access_token.clone();
     if let Some(refresh_token) = &credentials.refresh_token {
         account["refresh_token"] = refresh_token.clone();
@@ -895,10 +1092,17 @@ fn apply_live_credentials(account: &mut Value, credentials: &LiveCredentials) {
 /// 成功是**唯一**清除标记的地方（`needs_relogin` / reason / since / 退避计数一起清）；
 /// 唯一的另一种「凭据被证明续期过」是 adopt（见下），它清的是同一批字段。
 ///
-/// # 当前账号不再被抢刷（T01）
+/// # 当前账号不再被抢刷（T01）+ 信封分流（R6-01/R6-02）
 ///
-/// 抢到锁之后先判定 live 认证文件（[`decide_live_action`]）：
-/// - live 是同一个 uid 且凭据确实更新 → **adopt**：只回填账号库，不发请求、不写 live；
+/// 入口先过两道「不刷新」闸门（都在抢锁之前，因为它们既不发请求也不改凭据）：
+/// 1. `__at_rest` 临时副本（R6-06）→ 直接返回，outcome `skipped_at_rest`；
+/// 2. 凭据是加密信封（`access_token` 或 `refresh_token`）→ 直接返回，outcome
+///    `skipped_encrypted`；顺带惰性清理 R6-02 的历史误标。
+///
+/// 然后抢 `credentials.lock` 并判定 live 认证文件（[`decide_live_action`]）：
+/// - live 是明文且更新 → **adopt**：只回填账号库，不发请求、不写 live；
+/// - live 是信封且库内明文仍有效 → **保留明文**（`kept_plaintext`）；
+/// - live 是信封且不该刷新 → **跳过**（`skipped_encrypted`）；
 /// - live 存在但读不出来 → **跳过本次**（不落盘、不写标记）；
 /// - 其它情况 → 与改造前逐字一致，照常刷新。
 ///
@@ -913,6 +1117,16 @@ fn apply_live_credentials(account: &mut Value, credentials: &LiveCredentials) {
 /// 2. **抢不到就立即失败**（不等待、不降级继续）：不调用 `upsert_account`、不写
 ///    `needs_relogin`，只在返回值里放一个内存标记供保活/复核判定为「跳过」。
 pub async fn refresh_account_token(mut account: Value) -> Value {
+    // ⓪ R6-06 契约：解密出的临时副本绝刷新（会轮换掉客户端手里的令牌）。
+    if is_at_rest_temp(&account) {
+        account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_AT_REST);
+        return account;
+    }
+    // ⓪' R6-02：信封凭据不是「缺少 refresh token」。必须在下面 `rt.is_empty()` 之前判，
+    // 否则信封的 refresh_token（对象）取 `as_str()` 得空串，会走进「缺 RT」分支误标重登。
+    if has_envelope_credential(&account) {
+        return skip_encrypted_credential(account);
+    }
     let previous_access_token = account
         .get("access_token")
         .and_then(|value| value.as_str())
@@ -933,11 +1147,14 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
         // ② `upsert_account` 是「重新 load 全量账号库 → 只替换本账号 → 整文件原子写」的读改写，
         //    不是把整份账号库覆盖成手里的旧快照，因此不会像主路径那样用过期快照盖掉别人的写入。
         // 主路径（下面抢锁那段）之所以必须持锁，是因为它中间要 await 一次会轮换令牌的 HTTP 请求。
-        mark_relogin_required(
-            &mut account,
-            "缺少 refresh token，无法刷新，需重新登录".to_string(),
-        );
+        // 走到这里已经排除了信封（上面 ⓪'），所以这条标记是真的「RT 被删/被吊销」。
+        mark_relogin_required(&mut account, MISLABELED_RELOGIN_REASONS[0].to_string());
         let _ = upsert_account(&account);
+        credential_events::record_for_account(
+            &account,
+            ACTION_REFRESH_FAILED,
+            REASON_MISSING_REFRESH_TOKEN,
+        );
         return account;
     }
 
@@ -975,6 +1192,7 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
             // 诊断字段在落盘之后插入：它只属于本次调用，永远不进账号库。
             account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_ADOPTED);
             eprintln!("[refresh] 采用官方客户端的新凭据：未发刷新请求、未写认证文件");
+            credential_events::record_for_account(&account, ACTION_ADOPTED, REASON_OK);
             return account;
         }
         LiveAction::SkipUnreadable => {
@@ -983,6 +1201,25 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
             drop(lock);
             account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE);
             eprintln!("[refresh] 跳过刷新：认证文件存在但无法解析（可能正在被客户端写入）");
+            return account;
+        }
+        LiveAction::KeepPlaintext => {
+            // R6-01：live 是信封、库内明文仍有效 → 明文比信封值钱（信封还要客户端 keyblob
+            // 才能解）。不 `upsert_account`（否则会把 adopt 的旧行为又带回来）、不写
+            // `needs_relogin`、不发请求；只留一个内存诊断值供保活与诊断包区分。
+            drop(lock);
+            account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_KEPT_PLAINTEXT);
+            eprintln!("[refresh] 保留账号库明文：官方客户端已换用加密信封凭据");
+            credential_events::record_for_account(&account, ACTION_KEPT_PLAINTEXT, REASON_OK);
+            return account;
+        }
+        LiveAction::SkipEncrypted => {
+            // R6-01：live 是信封且不该刷新（来源非 oauth / 库内已是信封）。
+            // 与 KeepPlaintext 同一处置：不发请求、不改库、不写标记。
+            drop(lock);
+            account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_ENCRYPTED);
+            eprintln!("[refresh] 跳过刷新：凭据为客户端加密信封态（不改库、不发请求）");
+            credential_events::record_for_account(&account, ACTION_SKIPPED_ENCRYPTED, REASON_OK);
             return account;
         }
         LiveAction::RefreshAsBefore => {}
@@ -997,10 +1234,28 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
     let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
     let recovered = apply_refresh_response(&mut account, &resp);
     let _ = upsert_account(&account);
+    // 「是否需要用户处置」由分级函数直接给出，不看标记是否存在：账号可能本来就带着上一次
+    // 的标记，用「有没有标记」判断会把一次断网记成 `refresh_failed`。
+    let revoked = !recovered && classify_refresh_failure(&resp).marks_relogin();
     // 诊断字段同样在落盘之后插入（生产路径的取值见 `REFRESH_OUTCOME_REFRESHED`）。
     account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_REFRESHED);
     // ③ 账号库已经落盘，临界区到此结束；后面的 CLI 配置同步与凭据无关，不必持锁。
     drop(lock);
+    // 凭据事件（R6-01/R6-03 契约）在锁外记：临界区只该覆盖「写凭据」，
+    // 不要把另一个文件的读改写也塞进 `credentials.lock`。
+    // - 成功 → `refreshed/ok`；
+    // - **只**给「需要用户处置」的失败记 `refresh_failed/invalid_grant`（吊销）；
+    //   断网 / 5xx / 429 这类**暂时**失败**刻意不记**：保活每天都会跑，暂时失败会把
+    //   200 条环形窗口刷满，反而把真正的吊销挤出去（诊断包另有 `[刷新与保活]` 计数）。
+    if recovered {
+        credential_events::record_for_account(&account, ACTION_REFRESHED, REASON_OK);
+    } else if revoked {
+        credential_events::record_for_account(
+            &account,
+            ACTION_REFRESH_FAILED,
+            REASON_INVALID_GRANT,
+        );
+    }
     // Windows 不执行 apiKeyHelper；当前 CLI 账号刷新后同步 settings env。
     // 同步失败不阻断 WorkBuddy 保活；状态接口会根据 settings 与账号库是否
     // 一致显示“待同步”，避免把认证配置错误混入账号数据。
@@ -1129,6 +1384,13 @@ fn apply_refresh_response(account: &mut Value, resp: &Value) -> bool {
 /// 就等于对同一账号并发打两次 `/auth/token/refresh`；官方刷新带 refresh token
 /// 轮换，并发刷新会互相把对方的 refresh token 作废，反而制造「需重新登录」。
 pub async fn ensure_fresh_token(mut account: Value, cfg: &Value) -> Value {
+    // R6-06 契约：解密出的临时副本（`__at_rest`）**绝不刷新**。
+    // 它的 refresh token 是客户端手里那份的副本，用它刷新会把客户端的令牌轮换掉、
+    // 让用户掉登录。必须在函数入口第一步返回：后面的 `stale` 判定与旁路复核都不能跑。
+    if is_at_rest_temp(&account) {
+        account[REFRESH_OUTCOME_FIELD] = json!(REFRESH_OUTCOME_SKIPPED_AT_REST);
+        return account;
+    }
     let lazy_h = cfg
         .get("lazy_refresh_hours")
         .and_then(|v| v.as_i64())
@@ -1177,9 +1439,11 @@ fn should_spawn_verify(stale: bool, has_rt: bool, marked: bool) -> bool {
 /// 账号被迫重新登录。
 ///
 /// 每个账号的结果分三档：`ok` / `failed`（吊销，需重新登录）/ `temporary_failed`
-/// （断网、5xx 等，稍后自动重试，**不算**账号失效）。T01 之后另加两档，形状不变：
+/// （断网、5xx 等，稍后自动重试，**不算**账号失效）。T01 之后另加几档，形状不变：
 /// - `adopted`：当前登录账号的 live 凭据更新，已回填账号库（**没有**打刷新接口）；
-/// - `skipped`：本次没刷新（认证文件正在被写，或抢不到 `credentials.lock`）。
+/// - `kept_plaintext`：live 是加密信封、库内明文仍有效，保留明文（R6-01）；
+/// - `skipped`：本次没刷新（认证文件正在被写 / 抢不到 `credentials.lock` /
+///   凭据是加密信封）。**不是失败**：信封账号计入这一档，不计 `failed`（R6-02）。
 pub async fn run_keepalive_cycle() -> Value {
     let Some(_guard) = RunFlagGuard::try_acquire(&KEEPALIVE_RUNNING) else {
         return json!({"skipped": "already_running"});
@@ -1193,6 +1457,10 @@ pub async fn run_keepalive_cycle() -> Value {
     let total = accounts.len();
     let mut results: Vec<Value> = Vec::new();
     for mut acc in accounts {
+        // R6-06 防御：临时副本不该出现在账号库里（正常账号库不会有），万一出现也绝不刷新。
+        if is_at_rest_temp(&acc) {
+            continue;
+        }
         let exp = acc.get("expiresAt").and_then(|v| v.as_i64());
         let stale = keep_days <= 0
             || match exp {
@@ -1200,6 +1468,22 @@ pub async fn run_keepalive_cycle() -> Value {
                 None => true,
             };
         if !stale {
+            continue;
+        }
+        // R6-02：信封凭据必须在「缺 refresh token」判空**之前**判掉，否则每次启动/保活
+        // 都会给信封账号补一条「缺少 refresh token ⇒ 需重新登录」的误导性标记。
+        // 这里计 `skipped`（不是 `failed`）：账号没失效，只是本工具读不出明文。
+        if has_envelope_credential(&acc) {
+            if clear_mislabeled_relogin(&mut acc) {
+                eprintln!("[keepalive] 清理历史误标：信封凭据不再算「缺少 refresh token」");
+                let _ = upsert_account(&acc);
+            }
+            // 同账号同 action 有 60s 节流，保活连跑多轮也不会刷屏。
+            credential_events::record_for_account(&acc, ACTION_SKIPPED_ENCRYPTED, REASON_OK);
+            results.push(json!({
+                "email": crate::modules::account::account_display_name(&acc),
+                "status": "skipped",
+            }));
             continue;
         }
         if acc
@@ -1212,11 +1496,14 @@ pub async fn run_keepalive_cycle() -> Value {
             // 凭据写入锁。豁免理由也相同：没有 refresh token 就没有「服务端已轮换旧令牌」的
             // 竞态，写下的只是「需重新登录」标记，原凭据一个字节不变；而 `upsert_account` 是
             // 重新读全量账号库、只替换本账号的读改写，不是整文件覆盖，不会把别的账号刷回旧快照。
-            mark_relogin_required(
-                &mut acc,
-                "缺少 refresh token，无法保活，需重新登录".to_string(),
-            );
+            // 走到这里已经排除了信封（上面那条），所以这条标记是真的「RT 被删/被吊销」。
+            mark_relogin_required(&mut acc, MISLABELED_RELOGIN_REASONS[1].to_string());
             let _ = upsert_account(&acc);
+            credential_events::record_for_account(
+                &acc,
+                ACTION_REFRESH_FAILED,
+                REASON_MISSING_REFRESH_TOKEN,
+            );
             results.push(json!({
                 "email": crate::modules::account::account_display_name(&acc),
                 "status": "missing_rt",
@@ -1236,10 +1523,14 @@ pub async fn run_keepalive_cycle() -> Value {
             "failed"
         } else if outcome == Some(REFRESH_OUTCOME_ADOPTED) {
             "adopted"
+        } else if outcome == Some(REFRESH_OUTCOME_KEPT_PLAINTEXT) {
+            "kept_plaintext"
         } else if matches!(
             outcome,
             Some(REFRESH_OUTCOME_SKIPPED_LIVE_UNREADABLE)
                 | Some(REFRESH_OUTCOME_SKIPPED_CREDENTIAL_LOCK)
+                | Some(REFRESH_OUTCOME_SKIPPED_ENCRYPTED)
+                | Some(REFRESH_OUTCOME_SKIPPED_AT_REST)
         ) {
             "skipped"
         } else if temporary {
@@ -2378,5 +2669,551 @@ mod tests {
             fresh.get("refresh_failed_at").is_some(),
             "暂时失败要留诊断字段，供积分页/保活区分「稍后重试」"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R6-01：加密信封永不覆盖明文，按来源分流
+    // -----------------------------------------------------------------------
+
+    /// live 文件的 JSON 文本，token 允许是任意 JSON（明文串或 `$wbEncrypted` 信封）。
+    ///
+    /// 与 [`live_auth_json`] 同形，只有 token 的类型不同：R6-01 的判定完全依赖
+    /// 「值本身是不是信封对象」，所以这里必须能把对象塞进 `accessToken`。
+    fn live_auth_json_values(
+        uid: &str,
+        access_token: Value,
+        refresh_token: Value,
+        last_refresh_time: i64,
+        expires_at: i64,
+    ) -> String {
+        serde_json::to_string_pretty(&json!({
+            "account": {"uid": uid},
+            "auth": {
+                "accessToken": access_token,
+                "refreshToken": refresh_token,
+                "lastRefreshTime": last_refresh_time,
+                "expiresAt": expires_at,
+            },
+        }))
+        .expect("序列化 live 认证文件")
+    }
+
+    /// 一份 WorkBuddy 5.6 形态的加密信封（`$wbEncrypted` 包装；本工具不解密，只看形态）。
+    fn envelope() -> Value {
+        json!({
+            "$wbEncrypted": true,
+            "envelope": "AAECAwQFBgcICQoLDA0ODw==",
+            "keyId": "0123456789abcdef",
+            "suite": 1,
+        })
+    }
+
+    /// 把某个账号写进沙箱账号库，返回写入后的账号库字节（用于「一个字节都不许动」的断言）。
+    fn seed_accounts(account: &Value) -> Vec<u8> {
+        crate::modules::account::save_accounts(std::slice::from_ref(account))
+            .expect("写入沙箱账号库");
+        std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库")
+    }
+
+    /// 单测里把刷新请求引到本机不可达端口（只对指定账号生效，绝不打真实网关）。
+    fn override_refresh_url(account_id: &str) {
+        let _ = crate::modules::locks::recover(&REFRESH_URL_OVERRIDE).replace((
+            account_id.to_string(),
+            "http://127.0.0.1:1/v2/plugin/auth/token/refresh".to_string(),
+        ));
+    }
+
+    fn clear_refresh_url_override() {
+        let _ = crate::modules::locks::recover(&REFRESH_URL_OVERRIDE).take();
+    }
+
+    /// 验收 1：live 是信封、账号库明文未过期 → 保留明文。
+    ///
+    /// 三条同时成立才算过：账号库**逐字节不变**（既没被信封覆盖、也没被重排 JSON）、
+    /// **0 次刷新请求**、内存 outcome 是 `kept_plaintext`。
+    #[tokio::test]
+    async fn keep_plaintext_when_live_is_envelope_and_stored_plaintext_is_valid() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        let account = json!({
+            "id": "acc-r6-keep",
+            "uid": "uid-r6-keep",
+            "variant": "cn",
+            "access_token": "at-plain",
+            "refresh_token": "rt-plain",
+            // 明文仍有效（未来时刻），因此信封毫无价值。
+            "expiresAt": now_ms() + 86_400_000i64,
+        });
+        let accounts_before = seed_accounts(&account);
+        let live_path = write_live_auth_file(
+            variant,
+            &live_auth_json_values(
+                "uid-r6-keep",
+                envelope(),
+                envelope(),
+                now_ms() - 60_000,
+                now_ms() + 7_200_000,
+            ),
+        );
+        let live_before = std::fs::read(&live_path).expect("读取 live 认证文件");
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let kept = refresh_account_token(account).await;
+
+        assert_eq!(
+            refresh_outcome(&kept),
+            Some(REFRESH_OUTCOME_KEPT_PLAINTEXT),
+            "live 是信封、库内明文仍有效时必须保留明文"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "保留明文不得发刷新请求"
+        );
+        assert_eq!(
+            std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库"),
+            accounts_before,
+            "保留明文必须逐字节不动账号库（信封覆盖明文正是 R6-01 的原始故障）"
+        );
+        assert_eq!(
+            std::fs::read(&live_path).expect("读取 live 认证文件"),
+            live_before,
+            "不得改写 live 认证文件"
+        );
+        assert!(!has_relogin_marker(&kept), "保留明文不是失败，不得写标记");
+        // 事件日志：账号序号从 1 开始，action 与 outcome 同名。
+        let events = crate::modules::credential_events::recent(10);
+        assert_eq!(events[0]["action"], json!("kept_plaintext"));
+        assert_eq!(events[0]["account"], json!(1));
+        assert_eq!(events[0]["variant"], json!("cn"));
+    }
+
+    /// 验收 2：live 是信封、明文已过期、来源 `oauth` → 独立会话照常刷新。
+    ///
+    /// 网络换成「本机不可达端口」，只验证**确实发出了刷新请求**（计数 +1），绝不碰真实网关。
+    #[tokio::test]
+    async fn oauth_account_still_refreshes_when_live_is_envelope() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        let account = json!({
+            "id": "acc-r6-oauth",
+            "uid": "uid-r6-oauth",
+            "variant": "cn",
+            "credentialSource": "oauth",
+            // 明文已过期 → 信封出现时 oauth 账号要自己续期（独立会话）。
+            "access_token": "at-expired",
+            "refresh_token": "rt-live",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        seed_accounts(&account);
+        write_live_auth_file(
+            variant,
+            &live_auth_json_values(
+                "uid-r6-oauth",
+                envelope(),
+                envelope(),
+                now_ms() - 60_000,
+                now_ms() + 7_200_000,
+            ),
+        );
+        override_refresh_url("acc-r6-oauth");
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let refreshed = refresh_account_token(account).await;
+        clear_refresh_url_override();
+
+        assert_eq!(
+            refresh_outcome(&refreshed),
+            Some(REFRESH_OUTCOME_REFRESHED),
+            "oauth 账号必须走改造前的刷新路径"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before + 1,
+            "必须真的尝试过刷新（连不上是本机端口，不是没发）"
+        );
+        // 连不上 = 暂时失败：不写「需重新登录」，原凭据原样保留。
+        assert!(!has_relogin_marker(&refreshed));
+        assert_eq!(refreshed["access_token"], "at-expired");
+    }
+
+    /// 验收 3：live 是信封、明文已过期、来源 `local` → 跳过。
+    ///
+    /// `local` 与客户端共用 refresh 会话，用库里的旧 RT 去刷会把客户端顶掉；因此
+    /// 0 请求 + 账号库逐字节不变 + outcome `skipped_encrypted`。
+    #[tokio::test]
+    async fn local_account_skips_when_live_is_envelope() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        let account = json!({
+            "id": "acc-r6-local",
+            "uid": "uid-r6-local",
+            "variant": "cn",
+            "credentialSource": "local",
+            "access_token": "at-expired",
+            "refresh_token": "rt-shared",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        let accounts_before = seed_accounts(&account);
+        write_live_auth_file(
+            variant,
+            &live_auth_json_values(
+                "uid-r6-local",
+                envelope(),
+                envelope(),
+                now_ms() - 60_000,
+                now_ms() + 7_200_000,
+            ),
+        );
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let skipped = refresh_account_token(account).await;
+
+        assert_eq!(
+            refresh_outcome(&skipped),
+            Some(REFRESH_OUTCOME_SKIPPED_ENCRYPTED),
+            "local 账号遇到 live 信封必须跳过（不能抢刷客户端会话）"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "跳过不得发刷新请求"
+        );
+        assert_eq!(
+            std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库"),
+            accounts_before,
+            "跳过必须逐字节不动账号库"
+        );
+        assert!(
+            !has_relogin_marker(&skipped),
+            "跳过不是「需重新登录」：账号本身没被吊销"
+        );
+    }
+
+    /// 判不出来源（无 `credentialSource`、`auth_raw` 也不是认证文件形状）时按 `local` 保守处理。
+    #[tokio::test]
+    async fn unknown_source_is_treated_as_local_when_live_is_envelope() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+        let variant = WbVariant::Cn;
+
+        let account = json!({
+            "id": "acc-r6-unknown",
+            "uid": "uid-r6-unknown",
+            "variant": "cn",
+            "access_token": "at-expired",
+            "refresh_token": "rt-shared",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        seed_accounts(&account);
+        write_live_auth_file(
+            variant,
+            &live_auth_json_values(
+                "uid-r6-unknown",
+                envelope(),
+                envelope(),
+                now_ms() - 60_000,
+                now_ms() + 7_200_000,
+            ),
+        );
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let skipped = refresh_account_token(account).await;
+        assert_eq!(
+            refresh_outcome(&skipped),
+            Some(REFRESH_OUTCOME_SKIPPED_ENCRYPTED)
+        );
+        assert_eq!(REFRESH_HTTP_CALLS.load(Ordering::SeqCst), calls_before);
+    }
+
+    /// 验收 5：`apply_live_credentials` 的防御分支——信封不得覆盖明文字符串。
+    ///
+    /// 直接调私有函数，模拟「将来新增调用点绕过了 `decide_live_action`」。
+    #[test]
+    fn apply_live_credentials_refuses_to_overwrite_plaintext_with_envelope() {
+        let mut account = json!({
+            "id": "acc-r6-guard",
+            "access_token": "at-plain",
+            "refresh_token": "rt-plain",
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        let before = account.clone();
+        let credentials = LiveCredentials {
+            access_token: envelope(),
+            refresh_token: Some(envelope()),
+            expires_at: Some(1_800_000_000_000),
+            refreshed_at: Some(1_790_000_000_000),
+            refresh_expires_at: Some(1_900_000_000_000),
+        };
+
+        apply_live_credentials(&mut account, &credentials);
+
+        assert_eq!(account, before, "防御分支必须一个字段都不写");
+        assert_eq!(account["access_token"], "at-plain");
+    }
+
+    /// 防御分支不该误伤正常 adopt：live 是明文时照常回填（回归 T01 行为）。
+    #[test]
+    fn apply_live_credentials_still_applies_plaintext() {
+        let mut account = json!({"id": "acc-r6-apply", "access_token": "at-old"});
+        let credentials = LiveCredentials {
+            access_token: json!("at-new"),
+            refresh_token: Some(json!("rt-new")),
+            expires_at: Some(1_800_000_000_000),
+            refreshed_at: Some(1_790_000_000_000),
+            refresh_expires_at: None,
+        };
+
+        apply_live_credentials(&mut account, &credentials);
+
+        assert_eq!(account["access_token"], "at-new");
+        assert_eq!(account["refresh_token"], "rt-new");
+        assert_eq!(account["expiresAt"], json!(1_800_000_000_000i64));
+    }
+
+    /// 信封判定的回归：必须同时认 `access_token` 与 `refresh_token` 两个字段。
+    #[test]
+    fn envelope_detection_covers_both_credential_fields() {
+        assert!(has_envelope_credential(
+            &json!({"refresh_token": envelope()})
+        ));
+        assert!(has_envelope_credential(
+            &json!({"access_token": envelope()})
+        ));
+        assert!(!has_envelope_credential(
+            &json!({"access_token": "at", "refresh_token": "rt"})
+        ));
+        assert!(!has_envelope_credential(&json!({})));
+    }
+
+    // -----------------------------------------------------------------------
+    // R6-02：信封 refresh token 不再被误标「缺少 refresh token」
+    // -----------------------------------------------------------------------
+
+    /// 验收 6：信封账号 → 不写 `needs_relogin`、不 upsert、0 请求。
+    #[tokio::test]
+    async fn envelope_credentials_are_skipped_without_marking_relogin() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+
+        let account = json!({
+            "id": "acc-r6-envelope",
+            "uid": "uid-r6-envelope",
+            "variant": "cn",
+            "access_token": envelope(),
+            "refresh_token": envelope(),
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        let accounts_before = seed_accounts(&account);
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let skipped = refresh_account_token(account).await;
+
+        assert_eq!(
+            refresh_outcome(&skipped),
+            Some(REFRESH_OUTCOME_SKIPPED_ENCRYPTED)
+        );
+        assert_eq!(REFRESH_HTTP_CALLS.load(Ordering::SeqCst), calls_before);
+        assert!(
+            !has_relogin_marker(&skipped),
+            "信封不是「缺少 refresh token」：不得写 needs_relogin"
+        );
+        assert!(
+            skipped.get("needs_relogin_reason").is_none(),
+            "更不得写下误导性原因"
+        );
+        assert_eq!(
+            std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库"),
+            accounts_before,
+            "不得 upsert（账号库逐字节不变）"
+        );
+    }
+
+    /// 验收 7a：历史误标 + 信封 → 标记被**精确**清除（且真的落盘）。
+    #[tokio::test]
+    async fn stale_mislabel_is_cleared_for_envelope_accounts() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+
+        let mut account = json!({
+            "id": "acc-r6-mislabel",
+            "uid": "uid-r6-mislabel",
+            "variant": "cn",
+            "access_token": envelope(),
+            "refresh_token": envelope(),
+            "expiresAt": 1_700_000_000_000i64,
+            "needs_relogin": true,
+            "needs_relogin_since": 1_700_000_000_000i64,
+            "needs_relogin_fail_count": 7,
+            "needs_relogin_last_result": "failed",
+        });
+        account["needs_relogin_reason"] = json!(MISLABELED_RELOGIN_REASONS[0]);
+        seed_accounts(&account);
+
+        let _ = refresh_account_token(account).await;
+
+        let stored = crate::modules::account::load_accounts();
+        assert_eq!(stored.len(), 1);
+        for key in RELOGIN_FIELDS.iter().chain(TEMPORARY_FIELDS.iter()) {
+            assert!(
+                stored[0].get(*key).is_none(),
+                "历史误标必须连同配套字段一起清掉：`{key}` 仍在"
+            );
+        }
+        // 凭据原样保留：清标记不是「改凭据」。
+        assert!(is_envelope(&stored[0], "access_token"));
+    }
+
+    /// 验收 7b：同一条误标文案挂在**明文**账号上（真吊销 / 真缺 RT）→ 保留标记。
+    #[test]
+    fn mislabel_is_kept_for_plaintext_accounts() {
+        let mut account = json!({
+            "id": "acc-r6-revoked",
+            "access_token": "at",
+            "refresh_token": "rt",
+            "needs_relogin": true,
+        });
+        account["needs_relogin_reason"] = json!(MISLABELED_RELOGIN_REASONS[0]);
+
+        assert!(
+            !clear_mislabeled_relogin(&mut account),
+            "明文账号上的「缺少 refresh token」可能是真的，不得清"
+        );
+        assert!(has_relogin_marker(&account));
+        assert_eq!(
+            account["needs_relogin_reason"],
+            json!(MISLABELED_RELOGIN_REASONS[0])
+        );
+    }
+
+    /// 验收 7c：原因不是工具生成的那两条（服务端吊销）→ 一律不动。
+    #[test]
+    fn other_relogin_reasons_are_never_touched() {
+        for reason in [
+            "续期被拒（code=12153）：invalid_grant: Invalid refresh token",
+            // 前缀相同但**不是**逐字相等：不许按「包含」放宽。
+            "缺少 refresh token，无法刷新",
+            "",
+        ] {
+            let mut account = json!({
+                "access_token": envelope(),
+                "refresh_token": envelope(),
+                "needs_relogin": true,
+                "needs_relogin_reason": reason,
+            });
+            assert!(
+                !clear_mislabeled_relogin(&mut account),
+                "只允许清工具生成的两条精确文案，`{reason}` 不得清"
+            );
+            assert!(has_relogin_marker(&account));
+        }
+    }
+
+    /// 验收 8：保活汇总里信封账号计 `skipped`，**不计** `failed`，也不写标记。
+    #[tokio::test]
+    async fn keepalive_counts_envelope_accounts_as_skipped() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+
+        let account = json!({
+            "id": "acc-r6-keepalive",
+            "uid": "uid-r6-keepalive",
+            "variant": "cn",
+            "access_token": envelope(),
+            "refresh_token": envelope(),
+            // 过期 → 保活一定想处理它（默认 keepalive_days=0 时本就无条件处理）。
+            "expiresAt": 1_700_000_000_000i64,
+        });
+        seed_accounts(&account);
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let summary = run_keepalive_cycle().await;
+        let refreshed = summary["refreshed"].as_array().cloned().unwrap_or_default();
+
+        assert_eq!(refreshed.len(), 1, "保活必须扫到该账号：{summary}");
+        assert_eq!(
+            refreshed[0]["status"], "skipped",
+            "信封账号计 skipped（不是 failed）：{summary}"
+        );
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "保活不得对信封账号发刷新请求"
+        );
+        let stored = crate::modules::account::load_accounts();
+        assert!(!has_relogin_marker(&stored[0]), "不得写「需重新登录」");
+    }
+
+    // -----------------------------------------------------------------------
+    // R6-06 契约：`__at_rest` 临时副本绝不刷新
+    // -----------------------------------------------------------------------
+
+    /// 验收 10：临时副本走 `refresh_account_token` / `ensure_fresh_token` 都是 0 请求、不改库。
+    #[tokio::test]
+    async fn at_rest_temp_account_is_never_refreshed() {
+        let _env = lock_env().await;
+        let _sandbox = SandboxHome::new();
+
+        let account = json!({
+            "id": "acc-r6-at-rest",
+            "uid": "uid-r6-at-rest",
+            "variant": "cn",
+            // 临时副本的凭据是解密出的明文，且必然「临期」——最容易触发刷新的形态。
+            "access_token": "at-decrypted",
+            "refresh_token": "rt-decrypted",
+            "expiresAt": 1_700_000_000_000i64,
+            "__at_rest": true,
+        });
+        // 账号库里是**去掉标记**的同一账号（临时副本永远不落盘）。
+        let accounts_before = seed_accounts(&json!({
+            "id": "acc-r6-at-rest",
+            "uid": "uid-r6-at-rest",
+            "variant": "cn",
+            "access_token": "at-decrypted",
+            "refresh_token": "rt-decrypted",
+            "expiresAt": 1_700_000_000_000i64,
+        }));
+
+        assert!(is_at_rest_temp(&account), "标记必须可被守卫读到");
+
+        let calls_before = REFRESH_HTTP_CALLS.load(Ordering::SeqCst);
+        let refreshed = refresh_account_token(account.clone()).await;
+        assert_eq!(
+            refresh_outcome(&refreshed),
+            Some(REFRESH_OUTCOME_SKIPPED_AT_REST)
+        );
+
+        let ensured = ensure_fresh_token(account, &json!({"lazy_refresh_hours": 24})).await;
+        assert_eq!(
+            refresh_outcome(&ensured),
+            Some(REFRESH_OUTCOME_SKIPPED_AT_REST),
+            "ensure_fresh_token 也必须在入口直接返回"
+        );
+
+        assert_eq!(
+            REFRESH_HTTP_CALLS.load(Ordering::SeqCst),
+            calls_before,
+            "临时副本绝不允许发刷新请求（会轮换掉客户端的令牌）"
+        );
+        assert_eq!(
+            std::fs::read(crate::modules::config::accounts_file()).expect("读取账号库"),
+            accounts_before,
+            "临时副本不得写进账号库"
+        );
+    }
+
+    /// 普通账号不带 `__at_rest`，守卫不得误伤（回归）。
+    #[test]
+    fn at_rest_guard_ignores_normal_accounts() {
+        assert!(!is_at_rest_temp(&json!({"id": "acc"})));
+        assert!(!is_at_rest_temp(&json!({"id": "acc", "__at_rest": false})));
+        assert!(!is_at_rest_temp(&json!({"id": "acc", "__at_rest": "true"})));
+        assert!(is_at_rest_temp(&json!({"id": "acc", "__at_rest": true})));
     }
 }

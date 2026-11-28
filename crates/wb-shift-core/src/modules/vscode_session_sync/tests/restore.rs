@@ -188,6 +188,8 @@
             target_conversation_id: CONV_SRC.to_string(),
             target_uid: DST_UID.to_string(),
             backup_kind: VSCODE_STORE.backup_kind,
+            // R6-07：夹具按 VS Code 数据仓构造，命名空间与生产侧同源映射。
+            ns: Some(crate::modules::usage_origin::IdeClientSource::VSCode.namespace()),
             source_content: snapshot.clone(),
             target_content: snapshot,
         }

@@ -53,7 +53,13 @@ fn ide_source_merges_copied_session_history_as_a_union() {
     )
     .expect("write forked conversation");
 
-    let result = ide_source(root.clone(), "codebuddy-ide", None, &HashMap::new());
+    let result = ide_source(
+        root.clone(),
+        "codebuddy-ide",
+        None,
+        &HashMap::new(),
+        &mut Attribution::empty(),
+    );
 
     assert_eq!(result["filesScanned"], 3);
     // 并集：100 + 200 + 400；重放的 req-1 只算一次，分叉两边独有的请求都在。
@@ -123,7 +129,15 @@ fn get_statistics_returns_six_isolated_sources() {
 /// 国际版数据根缺少 jsonl 根时返回空集，不报错。
 #[test]
 fn ai_source_is_empty_and_error_free_when_roots_are_missing() {
-    let value = source_from_roots(&[], "workbuddy-ai", None, false, &HashMap::new());
+    let value = source_from_roots(
+        &[],
+        "workbuddy-ai",
+        None,
+        false,
+        &HashMap::new(),
+        &mut Attribution::empty(),
+        Some(namespace_for_variant(WbVariant::Ai)),
+    );
     assert_eq!(value["source"], "workbuddy-ai");
     assert_eq!(value["filesScanned"], 0);
     assert_eq!(value["summary"]["input"], 0);
@@ -186,6 +200,8 @@ fn multi_root_source_deduplicates_across_roots() {
         None,
         false,
         &HashMap::new(),
+        &mut Attribution::empty(),
+        Some(namespace_for_variant(WbVariant::Ai)),
     );
     // 两个根都被扫到；重放记录计一次，第二个根的新记录另计一次。
     assert_eq!(result["filesScanned"], 2);
@@ -549,9 +565,30 @@ fn ide_client_source_only_counts_its_own_client_directory() {
     write("WorkBuddy", "conv-shell", 400);
 
     let empty = HashMap::new();
-    let vscode = ide_client_source(root.clone(), "VSCode", "vscode-ext", None, &empty);
-    let jetbrains = ide_client_source(root.clone(), "JetBrains", "jetbrains", None, &empty);
-    let ide = ide_client_source(root.clone(), "CodeBuddyIDE", "codebuddy-ide", None, &empty);
+    let vscode = ide_client_source(
+        root.clone(),
+        "VSCode",
+        "vscode-ext",
+        None,
+        &empty,
+        &mut Attribution::empty(),
+    );
+    let jetbrains = ide_client_source(
+        root.clone(),
+        "JetBrains",
+        "jetbrains",
+        None,
+        &empty,
+        &mut Attribution::empty(),
+    );
+    let ide = ide_client_source(
+        root.clone(),
+        "CodeBuddyIDE",
+        "codebuddy-ide",
+        None,
+        &empty,
+        &mut Attribution::empty(),
+    );
 
     assert_eq!(vscode["source"], "vscode-ext");
     assert_eq!(vscode["summary"]["input"], 100);

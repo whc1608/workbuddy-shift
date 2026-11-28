@@ -7,10 +7,12 @@
 export interface DiagnosticsReport {
   /** 报告全文（纯文本，可直接粘贴进 issue）。 */
   text: string;
-  /** 服务端生成时间的毫秒时间戳。 */
+  /** 服务端生成时间的毫秒时间戳（存储口径，展示/文件名再转本地时间）。 */
   generatedAt: number;
   /** 文本字节数（UTF-8），用于展示体量。 */
   bytes: number;
+  /** 宿主侧生成耗时毫秒（R6-10）。 */
+  elapsedMs?: number;
 }
 
 /** `export_diagnostics` 的响应（桌面专属；网页版不落盘）。 */

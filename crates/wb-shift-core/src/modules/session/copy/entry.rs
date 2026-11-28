@@ -12,21 +12,61 @@ use super::*;
 
 /// 一次复制请求的附加开关（与 `sessionIds` 一样按操作传入，不做持久化配置）。
 ///
-/// 两个开关都只影响**增强数据**：忽略账本仍会写正文与 DB，复制工作记忆失败只落报告字段。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// 几个开关都只影响**增强数据**：忽略账本仍会写正文与 DB，复制工作记忆失败只落报告字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CopyOptions {
     /// 显式忽略会话账本（用量 + 中断记录）：只由「仍然复制」按钮传 `true`。
+    ///
+    /// 语义是「用户显式放弃账本，且不可逆、不做后台补写」，被 UI 的「仍然复制」按钮与
+    /// 操作恢复逻辑依赖，**不要**改它的含义（R6-08 新增了独立的 `copy_usage`）。
     pub ignore_aux: bool,
+    /// R6-08：是否把源账号的 `session_usage` 搬到副本。
+    ///
+    /// **默认 `false`**：历史消耗留在来源账号，副本只累计自己的新增（「谁用的记在谁
+    /// 头上」）。`ignore_aux = true` 时本字段无意义（账本整块跳过）。
+    ///
+    /// 不提供「连账本一起复制」的默认路径；将来若保留高级选项，必须二次确认并提示
+    /// 「会把来源账号的消耗记到目标账号」。
+    pub copy_usage: bool,
+    /// 中断记录：维持现状（默认 `true`，与积分无关）。
+    pub copy_interruptions: bool,
     /// 同时把源账号的工作记忆（`MEMORY.md`）追加到目标账号（issue #209）。
     pub copy_memory: bool,
 }
 
+impl Default for CopyOptions {
+    fn default() -> Self {
+        Self::new(false, false)
+    }
+}
+
 impl CopyOptions {
+    /// 存量签名（不变）：`ignore_aux` 为「仍然复制」开关，`copy_memory` 为工作记忆开关。
+    ///
+    /// 新增的 `copy_usage` 恒为 `false`（R6-08 的默认口径），`copy_interruptions` 随
+    /// `ignore_aux` 反向取值（忽略账本时连中断记录一起跳过）。
     pub fn new(ignore_aux: bool, copy_memory: bool) -> Self {
         Self {
             ignore_aux,
+            copy_usage: false,
+            copy_interruptions: !ignore_aux,
             copy_memory,
         }
+    }
+
+    /// 显式打开「连账本一起复制」。
+    ///
+    /// 生产路径**不**调用它：默认口径是「历史消耗归来源账号」。只有单测用它验证
+    /// 「开关打开时行为与 R6-08 之前逐字一致」，以及将来若做二次确认的高级选项。
+    pub fn with_copy_usage(mut self, copy_usage: bool) -> Self {
+        self.copy_usage = copy_usage;
+        self
+    }
+
+    /// 显式打开/关闭中断记录复制（默认随 `ignore_aux` 反向取值）。
+    pub fn with_copy_interruptions(mut self, copy_interruptions: bool) -> Self {
+        self.copy_interruptions = copy_interruptions;
+        self
     }
 }
 

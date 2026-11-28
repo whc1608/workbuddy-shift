@@ -403,6 +403,10 @@ pub(super) fn recover_copy_operation(
                 &operation.source.uid,
                 &operation.target.uid,
                 operation.aux_skipped,
+                // R6-08：恢复重放沿用默认口径（不搬来源历史消耗）。`Operation` 里没有这个
+                // 字段（不扩持久化契约）：生产路径从不打开 `copy_usage`，默认值就是新语义。
+                false,
+                !operation.aux_skipped,
                 body_latest_at,
             ) {
                 Ok(DbCopyOutcome::Inserted { .. }) => {}
@@ -457,6 +461,14 @@ pub(super) fn recover_copy_operation(
     if let Err(error) = advance_operation(paths, &mut operation, OpPhase::Completed) {
         return needs(error, true);
     }
+    // R6-07：恢复补完的复制同样要写归属交接。与 `finish_copy_from_body` 里的埋点互斥
+    // （本函数只处理 `phase < Completed` 的操作），因此不会双写；即使重复也是替换语义。
+    record_copy_origin_quiet(
+        paths,
+        variant,
+        &operation,
+        body_latest_at.map_or_else(now_ms, |latest| latest.max(now_ms())),
+    );
     cleanup_finished_operation(paths, variant, &operation);
     RecoverOutcome::Recovered(operation_id)
 }

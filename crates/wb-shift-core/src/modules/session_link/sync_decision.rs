@@ -197,6 +197,44 @@ fn mirror_ahead_reason(counts: (usize, usize, usize)) -> String {
 /// 第 5、6 条里与**基线**的比较仍走原始 `line_digests`：基线存的是写入当时的原始摘要，
 /// 换成比较口径就等于放宽「目标是否已偏离基线」，这是本次刻意不改的部分。
 ///
+/// 侧别称谓：判定原因与「内容不可验证」的提示共用同一套词，避免两处各说一套。
+pub const SOURCE_ACCOUNT_LABEL: &str = "当前账号";
+pub const TARGET_ACCOUNT_LABEL: &str = "目标账号";
+
+/// 单侧内容状态的可读说明；`account` 只取上面两个常量之一。
+///
+/// 桌面端与 VS Code 插件端的同步入口共用这一份：同一个故障在两个入口必须是同一句话，
+/// 否则用户换一个入口就认不出是同一个问题，排障时也会被措辞差异带偏。
+pub(crate) fn side_content_reason(account: &str, state: &ContentState) -> String {
+    match state {
+        ContentState::Ready(_) => format!("{account}的内容可验证"),
+        ContentState::Missing => format!("{account}的内容不存在，无法确认"),
+        ContentState::Unavailable(reason) => format!("{account}的内容无法确认：{reason}"),
+    }
+}
+
+/// 两侧内容状态的可读说明，供「内容不可验证」的兜底文案说明**是哪一侧**、**为什么**。
+///
+/// 只写确实不可验证的那一侧：两侧都不 Ready 时两侧都写，只有一侧不 Ready 时只写那一侧，
+/// 免得把「另一侧没问题」也写进拒绝理由里误导用户。两侧都可验证时返回 `None`——调用方
+/// 据此**不追加任何说明**：那种情况只是内容变多变少，没有「哪一侧坏了」可讲，多说反而误导。
+pub(crate) fn unverifiable_sides(source: &ContentState, target: &ContentState) -> Option<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(2);
+    if !matches!(source, ContentState::Ready(_)) {
+        parts.push(format!(
+            "来源：{}",
+            side_content_reason(SOURCE_ACCOUNT_LABEL, source)
+        ));
+    }
+    if !matches!(target, ContentState::Ready(_)) {
+        parts.push(format!(
+            "目标：{}",
+            side_content_reason(TARGET_ACCOUNT_LABEL, target)
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
+}
+
 /// 纯函数：不读文件、不写文件、无时间依赖。
 pub fn decide_sync(
     source: &ContentState,
@@ -206,16 +244,16 @@ pub fn decide_sync(
     let (source, target) = match (source, target) {
         (ContentState::Ready(source), ContentState::Ready(target)) => (source, target),
         (ContentState::Missing, _) => {
-            return SyncDecision::unknown("当前账号的内容不存在，无法确认")
+            return SyncDecision::unknown(side_content_reason(SOURCE_ACCOUNT_LABEL, source))
         }
-        (ContentState::Unavailable(reason), _) => {
-            return SyncDecision::unknown(format!("当前账号的内容无法确认：{reason}"))
+        (ContentState::Unavailable(_), _) => {
+            return SyncDecision::unknown(side_content_reason(SOURCE_ACCOUNT_LABEL, source))
         }
         (_, ContentState::Missing) => {
-            return SyncDecision::unknown("目标账号的内容不存在，无法确认")
+            return SyncDecision::unknown(side_content_reason(TARGET_ACCOUNT_LABEL, target))
         }
-        (_, ContentState::Unavailable(reason)) => {
-            return SyncDecision::unknown(format!("目标账号的内容无法确认：{reason}"))
+        (_, ContentState::Unavailable(_)) => {
+            return SyncDecision::unknown(side_content_reason(TARGET_ACCOUNT_LABEL, target))
         }
     };
     // 计数是给用户看的**解释**，因此与判定同一口径（比较口径）：否则判成一致（identical）的组

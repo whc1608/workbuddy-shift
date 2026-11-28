@@ -43,6 +43,25 @@ pub fn account_display_name(acc: &Value) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// 凭据形态（只判类型，**绝不输出值**）：供前端 R6-02 的「凭据已加密」chip 使用。
+///
+/// - `"envelope"`：`access_token` 是 WorkBuddy 5.6 的 `$wbEncrypted` 加密信封；
+/// - `"plain"`：`access_token` 是非空明文字符串（积分 / 签到 / 旅行可用）；
+/// - `"missing"`：缺失 / 空串 / 其它类型——连凭据都没有，既不是明文也不是信封。
+///
+/// 只判 `access_token`（请求实际携带的那个）而不看 `refresh_token`：卡片要回答的是
+/// 「这个账号现在能不能直接调接口」，混合形态下决定可用性的正是 access token。
+/// 信封判定复用 [`is_envelope`]，不要在这里另写一份 `$wbEncrypted` 判定。
+fn credential_kind(acc: &Value) -> &'static str {
+    if is_envelope(acc, "access_token") {
+        return "envelope";
+    }
+    match acc.get("access_token") {
+        Some(Value::String(text)) if !text.trim().is_empty() => "plain",
+        _ => "missing",
+    }
+}
+
 /// 账号的展示元数据（不泄露 token）。对照 server.py `account_meta`。
 /// 展示字段一律走 `display_value`：WorkBuddy 5.6 起 nickname/phoneNumber 可能是
 /// 加密信封对象，裸透传会导致前端 React error #31（白屏）。
@@ -64,6 +83,9 @@ pub fn account_meta(acc: &Value) -> Value {
         "createdAt": display_value(acc, "createdAt"),
         "needsRelogin": acc.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true),
         "needsReloginReason": display_value(acc, "needs_relogin_reason"),
+        // 凭据形态（R6-02）：加法式扩展，`"plain" | "envelope" | "missing"`，只有枚举没有值。
+        // 前端据此把信封账号的 chip 从「需重新登录」换成「凭据已加密」。
+        "credentialKind": credential_kind(acc),
         // 企业版标记（issue #167）：读取时判定，供前端展示「企业版」徽标，历史数据零迁移。
         "isEnterprise": is_enterprise_account(acc),
         // 档位随元数据下发，供宿主按档位过滤列表（缺省国内版，历史数据零迁移）。
@@ -72,6 +94,8 @@ pub fn account_meta(acc: &Value) -> Value {
         // 两个字段必须成对判断：`lastUsedAt` 缺失就等于「从未记录」，不显示「从未」这种噪音。
         "lastUsedAt": last_used_at(acc),
         "lastUsedClient": last_used_client(acc),
+        // 注意：`credentialSource`（R6-01）**刻意不下发**——它只在账号库内部决定刷新策略，
+        // 暴露出去等于新增契约面（见 R6-01「明确不做」）。
     })
 }
 

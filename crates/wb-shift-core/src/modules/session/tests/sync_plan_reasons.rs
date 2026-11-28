@@ -230,7 +230,7 @@ fn unverifiable_sides_names_only_the_broken_side() {
     );
 
     // 只有来源不可验证：只写来源，不把「另一侧没问题」也写进拒绝理由。
-    let only_source = unverifiable_sides(&unavailable, &ready).expect("来源不可验证应有说明");
+    let only_source = session_link::unverifiable_sides(&unavailable, &ready).expect("来源不可验证应有说明");
     assert!(
         only_source.contains("来源：当前账号的内容无法确认"),
         "{only_source}"
@@ -238,7 +238,7 @@ fn unverifiable_sides_names_only_the_broken_side() {
     assert!(!only_source.contains("目标："), "{only_source}");
 
     // 只有目标不可验证：只写目标。
-    let only_target = unverifiable_sides(&ready, &missing).expect("目标不可验证应有说明");
+    let only_target = session_link::unverifiable_sides(&ready, &missing).expect("目标不可验证应有说明");
     assert!(
         only_target.contains("目标：目标账号的内容不存在，无法确认"),
         "{only_target}"
@@ -246,7 +246,7 @@ fn unverifiable_sides_names_only_the_broken_side() {
     assert!(!only_target.contains("来源："), "{only_target}");
 
     // 两侧都不可验证：两侧都写，来源在前。
-    let both = unverifiable_sides(&unavailable, &missing).expect("两侧都不可验证应有说明");
+    let both = session_link::unverifiable_sides(&unavailable, &missing).expect("两侧都不可验证应有说明");
     assert!(both.starts_with("来源：当前账号的内容无法确认"), "{both}");
     assert!(
         both.contains("；目标：目标账号的内容不存在，无法确认"),
@@ -254,7 +254,7 @@ fn unverifiable_sides_names_only_the_broken_side() {
     );
 
     // 两侧都可验证：返回 None，调用方据此不追加任何内容状态说明。
-    assert!(unverifiable_sides(&ready, &ready).is_none());
+    assert!(session_link::unverifiable_sides(&ready, &ready).is_none());
 }
 
 /// 取出跳过文案与原因码；其它形态直接失败（用例只验证跳过路径）。

@@ -162,6 +162,12 @@ pub(crate) struct SyncItemPlan {
     pub(super) target_uid: String,
     /// 备份根目录名（`<工具存储根>/backups/<backup_kind>/<utc_iso>/`）。
     pub(super) backup_kind: &'static str,
+    /// R6-07：该数据仓的归属命名空间（`ns_for_client_dir(context.spec.client_dir)`）。
+    ///
+    /// `None` 表示未知客户端：不记归属索引，退化为 R6-07 之前的行为。
+    /// 执行阶段拿不到 `SessionStoreSpec`，因此在这里（`plan_sync_item` 里有 `context.spec`）
+    /// 一次算好带下来。
+    pub(super) ns: Option<&'static str>,
     pub(super) source_content: ContentSnapshot,
     pub(super) target_content: ContentSnapshot,
 }
@@ -249,14 +255,22 @@ pub(super) fn plan_sync_item(
     );
     let mismatches = session_link::verify_preview(&token, &live);
     if !mismatches.is_empty() {
-        return skip(format!("检查结果已失效：{}", mismatches.join("；")));
+        // 与桌面端同一口径：凭据核对排在模式门禁之前，若只报「内容已变化」，用户看不到
+        // 「哪一侧、坏在哪」。至少一侧不可验证时补上当前状态；两侧都 Ready（只是内容变多
+        // 变少）不补——那种情况没有「坏了」可讲。
+        let detail = session_link::unverifiable_sides(&source_content, &target_content)
+            .map(|sides| format!("（当前内容状态：{sides}）"))
+            .unwrap_or_default();
+        return skip(format!("检查结果已失效：{}{detail}", mismatches.join("；")));
     }
     if !decision.verdict.allows(selection.mode) {
         return SyncItemOutcome::Rejected {
+            // 前缀逐字保留（前端与既有测试按它匹配），只追加判定自己算出的原因。
             message: format!(
-                "该组判定为 {}，不允许以 {} 模式同步",
+                "该组判定为 {}，不允许以 {} 模式同步：{}",
                 decision.verdict.as_str(),
-                selection.mode.as_str()
+                selection.mode.as_str(),
+                decision.reason
             ),
         };
     }
@@ -264,7 +278,9 @@ pub(super) fn plan_sync_item(
     let (ContentState::Ready(source_snapshot), ContentState::Ready(target_snapshot)) =
         (&source_content, &target_content)
     else {
-        return skip("双方内容不可验证，检查结果已失效".to_string());
+        let sides = session_link::unverifiable_sides(&source_content, &target_content)
+            .unwrap_or_else(|| "两侧内容都可验证，无法给出具体原因".to_string());
+        return skip(format!("双方内容不可验证，检查结果已失效（{sides}）"));
     };
     SyncItemOutcome::Validated(Box::new(SyncItemPlan {
         group_id: selection.group_id.clone(),
@@ -282,6 +298,10 @@ pub(super) fn plan_sync_item(
         target_conversation_id: target_member.session_id.clone(),
         target_uid: context.target_uid.to_string(),
         backup_kind: context.spec.backup_kind,
+        // R6-07：命名空间与读侧（`token_stats::ide_client_source`）、写入侧
+        // （`vscode_session::copy_sessions_in_with`）共用同一份 `client_dir` 映射。
+        ns: crate::modules::usage_origin::IdeClientSource::from_client_dir(context.spec.client_dir)
+            .map(|client| client.namespace()),
         source_content: source_snapshot.clone(),
         target_content: target_snapshot.clone(),
     }))

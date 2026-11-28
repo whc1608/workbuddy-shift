@@ -1,4 +1,6 @@
 //! 同步阶段推进与中断恢复重放：正常执行与恢复共用同一段阶段化写入编排。
+use crate::modules::usage_origin;
+
 use super::*;
 /// 仅同步归档的阶段推进：`Prepared → DbWritten → Completed`。
 ///
@@ -248,6 +250,32 @@ pub(in crate::modules::session) fn execute_sync_item(
     {
         fail_operation(paths, &mut operation, &error);
         return Err(error);
+    }
+    // R6-07 写入点 2/4：WorkBuddy **同步**的归属交接。
+    //
+    // `session_groups::sync_all` / `session::sync_sessions_cross` 最终都走到这里（
+    // 恢复重放也走这里），因此**只埋一次**。位置在 `run_sync_phases` 成功之后：
+    // 此时操作已推进到 `Completed`，本次同步只会完成一次。
+    //
+    // `StatusOnly`（仅同步归档）零正文写入、不产生作者变更 → 必须跳过，否则会给一个
+    // 正文没变的会话凭空加一段归属。boundary 取 `max(本次正文最新活跃时间, now)`；
+    // 活跃时间来自清单里那份已核验摘要（`plan.incoming_text` 的字节），不重新读目标文件。
+    if mode != SyncMode::StatusOnly {
+        usage_origin::record_sync_quiet(
+            &paths.store_root,
+            usage_origin::namespace_for_variant(context.variant),
+            &operation.target.session_id,
+            usage_origin::namespace_for_variant(
+                operation.source_variant.unwrap_or(context.variant),
+            ),
+            &operation.source.session_id,
+            backup
+                .manifest
+                .incoming
+                .latest_activity_at
+                .map_or_else(now_ms, |latest| latest.max(now_ms())),
+            &operation.source.uid,
+        );
     }
     let _ = session_link::prune_operations(
         paths,

@@ -425,7 +425,13 @@ fn ide_source_reads_request_usage_and_skips_message_bodies() {
 
     let mut projects = HashMap::new();
     projects.insert("conv-a".to_string(), "example-project".to_string());
-    let result = ide_source(root.clone(), "codebuddy-ide", Some(now - 50_000), &projects);
+    let result = ide_source(
+        root.clone(),
+        "codebuddy-ide",
+        Some(now - 50_000),
+        &projects,
+        &mut Attribution::empty(),
+    );
 
     assert_eq!(result["source"], "codebuddy-ide");
     assert_eq!(result["filesScanned"], 2);

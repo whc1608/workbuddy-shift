@@ -81,6 +81,13 @@ pub async fn depart_travel_for_account(account: &Value) -> Value {
         return unsupported_variant_skip();
     }
     let cfg = load_checkin_config();
+    // R6-06：**必须在 ensure_fresh_token 之前**解析（信封账号先拿到临时副本，
+    // 刷新守卫直接静默返回），否则每次都会先走一遍 skipped_encrypted。
+    let resolved = crate::modules::at_rest::usable_account(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    );
+    let account = resolved.as_ref().unwrap_or(account);
     let acc = ensure_fresh_token(account.clone(), &cfg).await;
     let uid = acc.get("uid").and_then(Value::as_str).map(String::from);
     let uid_ref = uid.as_deref();
@@ -220,6 +227,13 @@ pub async fn depart_travel_for_account(account: &Value) -> Value {
 async fn claim_travel_for_account(account: &Value, prior: &Value) -> Value {
     let mut result = prior.clone();
     let cfg = load_checkin_config();
+    // R6-06：**必须在 ensure_fresh_token 之前**解析（信封账号先拿到临时副本，
+    // 刷新守卫直接静默返回），否则每次都会先走一遍 skipped_encrypted。
+    let resolved = crate::modules::at_rest::usable_account(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    );
+    let account = resolved.as_ref().unwrap_or(account);
     let acc = ensure_fresh_token(account.clone(), &cfg).await;
 
     let status = fetch_travel_status(&acc).await;
@@ -299,6 +313,13 @@ async fn apply_claim_response(account: &Value, result: &mut Value, record_id: i6
 
 pub(super) async fn sync_account_for_dispatch(account: &Value, prior: Option<&Value>) -> Value {
     let cfg = load_checkin_config();
+    // R6-06：**必须在 ensure_fresh_token 之前**解析（信封账号先拿到临时副本，
+    // 刷新守卫直接静默返回），否则每次都会先走一遍 skipped_encrypted。
+    let resolved = crate::modules::at_rest::usable_account(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    );
+    let account = resolved.as_ref().unwrap_or(account);
     let acc = ensure_fresh_token(account.clone(), &cfg).await;
     let uid = acc.get("uid").and_then(Value::as_str).map(String::from);
     let uid_ref = uid.as_deref();

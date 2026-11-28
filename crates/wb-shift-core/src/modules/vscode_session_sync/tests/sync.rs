@@ -521,3 +521,104 @@
         assert_eq!(groups.len(), 1, "判定不可用时不得剔除任何组：{preview}");
         assert_eq!(groups[0]["verdict"], "unknown", "{preview}");
     }
+
+    /// 判定为 diverge 时用快进模式 → 拒绝文案必须带上判定自己算出的原因。
+    ///
+    /// 前缀 `该组判定为 X，不允许以 Y 模式同步` 是前端提示与既有用例的匹配锚点，
+    /// 逐字保留；原因只能追加在它后面。
+    #[test]
+    fn sync_reject_message_appends_verdict_reason() {
+        let fixture = Fixture::new("reject-reason");
+        seed_source(&fixture);
+        let target_conv = copy_and_register(&fixture);
+        // 副本本地改动 + 源侧新增一轮 → 两边都有改动 = 真分歧。
+        let target_dir = fixture.dst_conv_dir(&target_conv);
+        let assistant = target_dir.join(format!("messages/{}.json", records(&target_dir)[1]));
+        let text = std::fs::read_to_string(&assistant)
+            .unwrap()
+            .replace("在的", "在的（副本本地改动）");
+        std::fs::write(&assistant, text).unwrap();
+        append_round(&fixture, MSG_3, MSG_4, REQ_2, "新增内容");
+
+        let preview =
+            links_preview_at(&fixture.root, &fixture.paths(), SRC_UID, &target_acc()).unwrap();
+        let group = &preview["groups"][0];
+        assert_eq!(group["verdict"], "diverge", "{preview}");
+        let report = sync_selected_at(
+            &fixture.root,
+            &fixture.paths(),
+            SRC_UID,
+            &target_acc(),
+            &[selection(
+                group["groupId"].as_str().unwrap(),
+                group["previewToken"].as_str().unwrap(),
+                SyncMode::FastForward,
+            )],
+        )
+        .unwrap();
+
+        assert!(
+            report["skipped"].as_array().unwrap().is_empty(),
+            "模式越权是拒绝而不是跳过：{report}"
+        );
+        let errors = report["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{report}");
+        let message = errors[0]["error"].as_str().unwrap();
+        assert!(
+            message.starts_with("该组判定为 diverge，不允许以 fastForward 模式同步"),
+            "前缀必须逐字保留：{message}"
+        );
+        assert!(
+            message.contains("两边都有改动"),
+            "判定原因必须追加在前缀之后：{message}"
+        );
+    }
+
+    /// 预览之后来源正文损坏 → 跳过文案要说清是哪一侧、为什么（不是只说「内容已变化」）。
+    #[test]
+    fn stale_preview_explains_corrupted_source() {
+        let fixture = Fixture::new("stale-explain");
+        seed_source(&fixture);
+        let target_conv = copy_and_register(&fixture);
+        append_round(&fixture, MSG_3, MSG_4, REQ_2, "新增内容");
+
+        let preview =
+            links_preview_at(&fixture.root, &fixture.paths(), SRC_UID, &target_acc()).unwrap();
+        let group = &preview["groups"][0];
+        assert_eq!(group["verdict"], "fastForward", "{preview}");
+        let group_id = group["groupId"].as_str().unwrap().to_string();
+        let token = group["previewToken"].as_str().unwrap().to_string();
+
+        // 预览之后把来源的一条消息文件删掉：索引仍指着它 → 内容不可验证。
+        let src_dir = fixture.src_conv_dir();
+        let victim = records(&src_dir)[1].clone();
+        std::fs::remove_file(src_dir.join("messages").join(format!("{victim}.json"))).unwrap();
+
+        let report = sync_selected_at(
+            &fixture.root,
+            &fixture.paths(),
+            SRC_UID,
+            &target_acc(),
+            &[selection(&group_id, &token, SyncMode::FastForward)],
+        )
+        .unwrap();
+
+        assert!(
+            report["errors"].as_array().unwrap().is_empty(),
+            "预览过期是跳过而不是拒绝：{report}"
+        );
+        let skipped = report["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{report}");
+        let message = skipped[0]["message"].as_str().unwrap();
+        assert!(message.contains("检查结果已失效："), "{message}");
+        assert!(message.contains("当前内容状态："), "{message}");
+        assert!(message.contains("当前账号的内容无法确认"), "{message}");
+        assert!(message.contains(&victim), "原因应指出是哪条消息：{message}");
+        assert_eq!(skipped[0]["reasonCode"], "previewStale", "{report}");
+        // 目标副本未被打动。
+        assert_eq!(
+            records(&fixture.dst_conv_dir(&target_conv)).len(),
+            2,
+            "跳过不得写入"
+        );
+    }

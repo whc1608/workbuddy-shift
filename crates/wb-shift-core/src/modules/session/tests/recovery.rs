@@ -1516,3 +1516,86 @@ fn sync_recovery_stops_without_usable_backup() {
     );
     assert_eq!(body_bytes(&env, &target_id), target_before);
 }
+
+/// 结束一条「目标已被改写」的未完成同步：只改记录、保留备份，且之后不再挡住同步。
+#[test]
+fn discard_unfinished_sync_ends_stuck_record_and_keeps_backup() {
+    let env = ready_env_with_status("discard-stuck");
+    let (group_id, token, target_id) = archive_scene(&env, "completed");
+    install_block_update_trigger(&env);
+    let report = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::StatusOnly)],
+    );
+    assert!(report["synced"].as_array().unwrap().is_empty(), "{report}");
+    drop_block_update_trigger(&env);
+    // 中断期间目标被打开并追加：现场变成「不可验证」，自动恢复会拒绝。
+    append_records(&env.body_path(&target_id), &target_id, 100, 1);
+    let recovery = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+    assert_eq!(recovery.needs_recovery.len(), 1, "{:?}", recovery);
+
+    let operation = sync_operations(&env)[0].clone();
+    let backup_dir = PathBuf::from(operation.backup.clone().unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(backup_dir.exists(), "前提：中断现场留有备份");
+
+    let result = discard_unfinished_sync(&env.paths, &operation.operation_id).expect("应允许结束");
+    assert!(result.backup_kept, "目标可能被改写时必须保留备份");
+    assert!(backup_dir.exists(), "备份必须留在原地");
+
+    let after = sync_operations(&env)[0].clone();
+    assert_eq!(after.phase, OpPhase::Abandoned);
+    assert_eq!(after.cleanup_state, None, "不得给维护入口删除授权");
+    assert!(after
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("用户手动结束"));
+
+    // 记录已不再是「未完成」：后续恢复不再上报，同步也不会再被它挡住。
+    let again = recover_pending_session_operations_at(&env.paths, WbVariant::Cn);
+    assert!(again.needs_recovery.is_empty(), "{:?}", again);
+    assert!(again.recovered.is_empty(), "{:?}", again);
+
+    // 重复结束：明确拒绝，而不是默默成功。
+    let second = discard_unfinished_sync(&env.paths, &operation.operation_id);
+    assert!(second.is_err(), "已结束的记录不应再次结束");
+}
+
+/// 未知 id 与「不完整扫描」之外的常规错误：给可读文案，不 panic。
+#[test]
+fn discard_unfinished_sync_rejects_unknown_operation() {
+    let env = ready_env_with_status("discard-unknown-id");
+    let error = discard_unfinished_sync(&env.paths, "not-a-real-operation").unwrap_err();
+    assert!(error.contains("找不到这条操作记录"), "{error}");
+}
+
+/// 列表：只列未完成项，标题取自操作自身档位的数据根（单测注入同一个临时目录）。
+#[test]
+fn pending_session_writes_lists_unfinished_with_title() {
+    let env = ready_env_with_status("pending-list");
+    let (group_id, token, target_id) = archive_scene(&env, "completed");
+    install_block_update_trigger(&env);
+    let _ = sync(
+        &env,
+        "uid-b",
+        &[selection(&group_id, &token, SyncMode::StatusOnly)],
+    );
+    drop_block_update_trigger(&env);
+
+    let items = pending_session_operations_with(&env.paths, |_| env.paths.clone())
+        .expect("列表应可读取");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].target_session_id, target_id);
+    assert_eq!(items[0].kind, "sync");
+    assert!(items[0].discardable, "同步的中断记录应可结束");
+    assert!(items[0].title.is_some(), "标题应从 sessions 表解析出来");
+
+    // 结束后列表清空（记录仍是 Abandoned，但不再是「未完成」）。
+    discard_unfinished_sync(&env.paths, &items[0].operation_id).expect("应可结束");
+    let after = pending_session_operations_with(&env.paths, |_| env.paths.clone()).unwrap();
+    assert!(after.is_empty(), "{after:?}");
+}

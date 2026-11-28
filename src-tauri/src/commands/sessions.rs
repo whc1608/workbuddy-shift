@@ -178,3 +178,32 @@ pub async fn session_sync_cross(
     .await
     .map_err(|e| e.to_string())?
 }
+
+/// 列出未完成的会话写入（设置页「未完成的写入」；只读）。
+///
+/// 操作目录跨档共用（`~/.workbuddy-shift/session-links`），档位只影响标题解析，由 core
+/// 按操作自身的 `variant` 处理，因此这里固定用任一档位构造存储路径。
+#[tauri::command]
+pub async fn session_pending_writes() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = session::SessionPaths::for_variant(WbVariant::Cn);
+        session::pending_session_operations(&paths).map(|items| json!({ "items": items }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 结束一次未完成的同步写入（只改操作记录，不碰正文与会话行）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn session_discard_write(operation_id: String) -> Result<Value, String> {
+    if operation_id.trim().is_empty() {
+        return Err("缺少 operationId".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = session::SessionPaths::for_variant(WbVariant::Cn);
+        session::discard_unfinished_sync(&paths, &operation_id)
+            .and_then(|result| serde_json::to_value(result).map_err(|e| e.to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -119,6 +119,22 @@ pub(super) enum MergeOutcome {
     Skipped,
 }
 
+/// 导入记录补齐凭据来源（R6-01）。
+///
+/// 口径（见 `执行默认`）：**导出/导入保留该字段**——备份自带 `credentialSource` 时原样保留
+/// （同一台机器导出再导入，账号的刷新策略不该被改写）。备份**没有**该字段（旧备份、第三方
+/// 号池导出）时按 [`account::CredentialSource::Import`] 保守处理：备份无法区分来源，而
+/// 误判成 `oauth` 会让本工具用导入的旧 refresh token 去刷，把另一台机器上的客户端顶掉。
+///
+/// 必须在 `inherit_local_fields` **之前**调用：一旦这里补上了键，本地值的继承就不会生效——
+/// 这正是「备份里的 token 已经替换了本地 token，来源也随之变成 import」的正确语义。
+fn apply_import_credential_source(record: &mut Value) {
+    if account::explicit_credential_source(record).is_some() {
+        return;
+    }
+    account::set_credential_source(record, account::CredentialSource::Import);
+}
+
 /// 纯函数：把一条导入记录合并进账号列表。
 ///
 /// 按 uid 去重：同 uid 覆盖（保留导入记录原样）；uid 缺失或无法匹配则追加。
@@ -138,6 +154,8 @@ pub(super) fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> Me
             .find(|a| account::get_str(a, "uid").as_deref() == Some(uid))
         {
             let mut replaced = item.clone();
+            // 凭据来源：备份带了就保留，没带就按 `import`（见 `apply_import_credential_source`）。
+            apply_import_credential_source(&mut replaced);
             // 本地展示字段（备注 / 显示选择 / 标记）：备份未携带时保留本地值；
             // 备份自带则以备份为准（导入即恢复用户当时的展示配置）。
             // 白名单见 `account::LOCAL_ACCOUNT_FIELDS`——导入**旧备份**（不含 mark）时
@@ -157,6 +175,7 @@ pub(super) fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> Me
     // 追加同样必须带 id：缺 id 的记录在刷新回写时无法被按 id 覆盖，会被
     // 反复追加副本（issue #111）。
     let mut appended = item.clone();
+    apply_import_credential_source(&mut appended);
     if account::get_str(&appended, "id").is_none() {
         appended["id"] = Value::String(uuid::Uuid::new_v4().to_string());
     }

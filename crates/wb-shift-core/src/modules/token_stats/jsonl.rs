@@ -384,12 +384,16 @@ impl SourceCollector {
 /// CLI 日志不按账号分目录，也没有账号字段：这里不传 uid 映射，全部记录归「未归属」。
 /// **禁止**用当前登录账号反推历史用量——切过号就会错归属。
 pub(super) fn source(root: PathBuf, name: &str, cutoff: Option<i64>, detail: bool) -> Value {
+    // CLI：没有账号归因也没有归属索引，指纹集合独立（不与 WorkBuddy 共用，避免少计）。
+    let mut attribution = Attribution::empty();
     source_from_roots(
         std::slice::from_ref(&root),
         name,
         cutoff,
         detail,
         &HashMap::new(),
+        &mut attribution,
+        None,
     )
 }
 
@@ -442,12 +446,17 @@ pub(super) fn session_uid_index_at(data_root: &Path) -> HashMap<String, String> 
 ///
 /// 国际版数据根与国内版不同构（实测无 `projects/`、只有 `sessions/`），因此按
 /// 「存在的根」探测；一个都不存在时返回空集且不报错（前端显示空状态）。
+///
+/// `attribution` 携带本轮共享的归属索引与指纹集合：`namespace = None` 表示这个来源
+/// 没有账号归因（CodeBuddy CLI），此时归属一律为空串、指纹集合独立。
 pub(super) fn source_from_roots(
     roots: &[PathBuf],
     name: &str,
     cutoff: Option<i64>,
     detail: bool,
     uid_by_session: &HashMap<String, String>,
+    attribution: &mut Attribution,
+    namespace: Option<&'static str>,
 ) -> Value {
     let mut targets: Vec<Target> = Vec::new();
     for root in roots {
@@ -466,25 +475,30 @@ pub(super) fn source_from_roots(
 
     // Copied/forked sessions replay the parent history (including usage
     // records with their original timestamps) into their own JSONL, so the
-    // same request would otherwise be counted once per copy. Process files
-    // oldest first and skip fingerprints already seen in an earlier file so
-    // usage stays attributed to the original session.
+    // same request would otherwise be counted once per copy. Fingerprints are
+    // shared across the CN/AI sources (`attribution.workbuddy_seen`) and the
+    // first hit wins, so the usage stays attributed to the file where it first
+    // appeared — and across variants it is only counted once at all.
     //
     // 排序键直接用扫描时取到的 mtime（同一份数据既用于排序也用于窗口裁剪），
     // 取不到 mtime 的文件排在最后，与原实现一致。
     targets.sort_by_key(|target| target.modified_ms.unwrap_or(i64::MAX));
-    let mut seen: HashSet<(i64, u64, u64, u64, u64, Arc<str>)> = HashSet::new();
 
     for target in &targets {
         // 整份文件都早于窗口起点时不必读盘：记录时间戳不可能晚于落盘时间
         // （留一天余量吸收时钟回拨）。注意 `filesScanned` 仍按发现的文件总数
         // 返回，裁剪只影响读盘量。
+        let session_id = target.session_id();
+        if let Some(namespace) = namespace {
+            // 存活键用于统计结束后的 GC：文件还在就说明会话还在（与窗口无关）。
+            attribution.note_alive(namespace, &session_id);
+        }
         if target.is_outside(cutoff) {
             continue;
         }
-        let session_id = target.session_id();
-        // 归属账号：文件名（conversation id）在 `sessions.user_id` 里的映射；查不到即未归属。
-        let uid = uid_by_session.get(&session_id).cloned().unwrap_or_default();
+        // 文件级归属账号：文件名（conversation id）在 `sessions.user_id` 里的映射；
+        // 查不到即未归属。逐条记录会先按归属索引的段覆盖它（R6-07）。
+        let file_uid = uid_by_session.get(&session_id).cloned().unwrap_or_default();
         let fallback_project = project_name(&target.root, &target.path);
         let Some(parsed) = parsed_file(&target.path) else {
             collector.note_parse_error();
@@ -492,7 +506,9 @@ pub(super) fn source_from_roots(
         };
         collector.note_parse_errors(parsed.parse_errors);
 
-        let mut session_totals = Totals::default();
+        // 按账号分别累计会话行：同一份文件里可能既有继承来的历史（归来源账号）、
+        // 也有轮到自己新增的记录（归文件账号），一行装不下两种归属。
+        let mut totals_by_uid: HashMap<String, Totals> = HashMap::new();
         // Detail rows are buffered per file so the file-scoped title can be
         // backfilled once the whole file has been read.
         let mut file_requests: Vec<RequestRow> = Vec::new();
@@ -510,7 +526,7 @@ pub(super) fn source_from_roots(
             // window. The interned model name is shared, so building the
             // fingerprint key costs no allocation.
             let duplicate = record.timestamp.is_some_and(|ts| {
-                !seen.insert((
+                !attribution.workbuddy_seen.insert((
                     ts,
                     record.usage.input,
                     record.usage.output,
@@ -522,11 +538,26 @@ pub(super) fn source_from_roots(
             if duplicate {
                 continue;
             }
+            // 记录级归属（R6-07）：按记录自身时间戳落段，命中即用段里的账号；
+            // 没有索引条目 / 记录晚于所有段 / 没有时间戳 → 回退文件 uid。
+            let uid = match namespace {
+                Some(namespace) => {
+                    attribution.uid_for(namespace, &session_id, record.timestamp, &file_uid)
+                }
+                None => file_uid.clone(),
+            };
             let project = record.project.as_deref().unwrap_or(&fallback_project);
             if session_project.is_none() {
                 session_project = Some(project.to_string());
             }
-            session_totals.add(record.usage);
+            // 先查后插：uid 在同一文件里高度重复，避免每条都新分配。
+            if let Some(totals) = totals_by_uid.get_mut(&uid) {
+                totals.add(record.usage);
+            } else {
+                let mut totals = Totals::default();
+                totals.add(record.usage);
+                totals_by_uid.insert(uid.clone(), totals);
+            }
             collector.add(record.usage, &record.model, project, record.timestamp, &uid);
             if collector.collect_requests {
                 if let Some(ts) = record.timestamp {
@@ -536,7 +567,9 @@ pub(super) fn source_from_roots(
                         project: project.to_string(),
                         session_id: session_id.clone(),
                         title: None,
-                        uid: uid.clone(),
+                        // 明细行仍以文件 uid 兜底（清单口径）：明细窗口只做展示，
+                        // 归属数字以 `collector` 的 per-account 聚合为准。
+                        uid: file_uid.clone(),
                         usage: record.usage,
                         thinking: record.thinking,
                     });
@@ -555,13 +588,20 @@ pub(super) fn source_from_roots(
                 collector.push_request(row);
             }
         }
-        collector.push_session(
-            session_id,
-            title,
-            session_project.unwrap_or(fallback_project),
-            uid,
-            session_totals,
-        );
+        // 固定顺序（uid 升序）让同一份数据的响应可重复对比。
+        let mut ordered: Vec<(String, Totals)> = totals_by_uid.into_iter().collect();
+        ordered.sort_by(|left, right| left.0.cmp(&right.0));
+        for (uid, totals) in ordered {
+            collector.push_session(
+                session_id.clone(),
+                title.clone(),
+                session_project
+                    .clone()
+                    .unwrap_or_else(|| fallback_project.clone()),
+                uid,
+                totals,
+            );
+        }
     }
 
     collector.into_value(name, targets.len())

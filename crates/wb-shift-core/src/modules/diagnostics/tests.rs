@@ -1,17 +1,20 @@
-//! 诊断包的行为测试：脱敏不泄漏、形状稳定、落盘校验。
+//! 诊断包的行为测试：脱敏不泄漏、分段齐全、日志聚合、失败降级、并行探测。
 //!
-//! 全部用临时目录与手写数据，**不读真实数据目录**（`WB_SHIFT_HOME` 也不依赖）：
-//! 只有 [`probe_store_writable`](super::report::probe_store_writable) 这类生产专用探测
+//! 全部用临时目录与手写事实，**不读真实数据目录**：只有
+//! [`probe_store_writable`](super::report::probe_store_writable) 这类生产专用探测
 //! 不在测试路径上。
 
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use super::facts::{self, AccessState, AccountFact, ReloginState, TokenKind};
 use super::report::{
-    build_report, save_report, ClientProbe, HookState, HostForm, ReportInput, ReportSources,
+    build_report, hook_state_from_status, probe_clients, save_report, ClientProbe, HookState,
+    HookTarget, HostForm, ProbeSpec, ProbeStatus, ReportFacts, ReportInput, ReportSources,
     DEFAULT_LOG_LINES, MAX_REPORT_BYTES,
 };
-use super::{account_bucket, redact_text};
+use super::{account_bucket, format_timestamp_with_offset, redact_text};
 
 /// 临时目录 + `error.log` 路径。
 fn temp_log(name: &str) -> (PathBuf, PathBuf) {
@@ -37,218 +40,389 @@ fn input() -> ReportInput {
     ReportInput {
         host_form: HostForm::Desktop,
         locale: "zh-CN".to_string(),
-        account_count: 3,
+        account_count: 2,
         clients: vec![
-            ClientProbe::new("WorkBuddy", true, Some("1.2.3".to_string())),
-            ClientProbe::new("CodeBuddy CLI", false, None),
+            ClientProbe::new("WorkBuddy", true, Some("5.11.3".to_string())),
+            ClientProbe {
+                name: "JetBrains 插件".to_string(),
+                installed: false,
+                version: None,
+                running: None,
+                probe_status: ProbeStatus::Timeout,
+                elapsed_ms: Some(800),
+            },
         ],
     }
 }
 
-/// `report` 的固定形状：分段标题、宿主标识、账号区间都在。
+/// 手动构造两条账号事实：一个明文、一个信封。
+fn sample_account_facts(now: i64) -> Vec<AccountFact> {
+    let accounts = vec![
+        json!({
+            "access_token": "PLAINTEXT-SECRET-TOKEN-abcdef",
+            "refresh_token": "REFRESH-SECRET-abcdef",
+            "expiresAt": now + 5 * 3_600_000i64,
+            "credentialSource": "oauth",
+            "variant": "cn",
+            "email": "leak@example.com",
+            "uid": "uid-123",
+            "nickname": "私有昵称",
+        }),
+        json!({
+            "access_token": {"$wbEncrypted": "ENVELOPE-BODY"},
+            "variant": "cn",
+            "credentialSource": "local",
+        }),
+    ];
+    facts::account_facts(&accounts, now)
+}
+
+fn base_sources(log: PathBuf, facts: ReportFacts) -> ReportSources {
+    ReportSources {
+        error_log: log,
+        error_log_limit: DEFAULT_LOG_LINES,
+        hook: Some(HookState {
+            installed: true,
+            registered_targets: 1,
+            total_targets: 2,
+            script_exists: true,
+            targets: vec![
+                HookTarget {
+                    label: "Claude CLI".to_string(),
+                    exists: true,
+                    installed: true,
+                },
+                HookTarget {
+                    label: "CodeBuddy".to_string(),
+                    exists: true,
+                    installed: false,
+                },
+            ],
+        }),
+        store_writable: Some(true),
+        generated_at_ms: 1_700_000_000_123,
+        utc_offset_seconds: 8 * 3600,
+        facts,
+    }
+}
+
 #[test]
-fn report_contains_expected_sections() {
-    let (dir, log) = temp_log("shape");
+fn format_timestamp_uses_injected_offset() {
+    // 2026-11-27 16:53:36 UTC = 2026-11-28 00:53:36 +08:00
+    let ms = 1_795_798_416_000i64;
+    assert_eq!(
+        format_timestamp_with_offset(ms, 8 * 3600),
+        "2026-11-28 00:53:36 +08:00"
+    );
+    // UTC 偏移 0。
+    assert_eq!(
+        format_timestamp_with_offset(ms, 0),
+        "2026-11-27 16:53:36 +00:00"
+    );
+    // 负偏移。
+    assert_eq!(
+        format_timestamp_with_offset(ms, -5 * 3600),
+        "2026-11-27 11:53:36 -05:00"
+    );
+}
+
+/// 报告快照：分段齐全、账号只有 #1/#2、全文不含 token / 路径 / 邮箱样例子串。
+#[test]
+fn report_snapshot_has_sections_and_no_secrets() {
+    let (dir, log) = temp_log("snapshot");
     write_log(
         &log,
-        &[json!({
-            "ts": 1_700_000_000_123i64,
-            "kind": "backend",
-            "message": "切换失败",
-            "detail": "",
-            "appVersion": "0.9.3",
-            "os": "macos",
-        })],
+        &[
+            json!({"ts": 1_700_000_000_000i64, "kind": "backend", "message": "读取 /Users/alex/x.json 失败", "detail": "Authorization: Bearer sk-secret-123"}),
+            json!({"ts": 1_700_000_000_100i64, "kind": "backend", "message": "切换失败", "detail": ""}),
+            json!({"ts": 1_700_000_000_200i64, "kind": "backend", "message": "联系 leak@example.com", "detail": ""}),
+        ],
     );
+    let now = 1_700_000_000_123i64;
+    let facts = ReportFacts {
+        accounts: sample_account_facts(now),
+        account_store: Some(facts::AccountStoreFact {
+            total: 2,
+            size_bytes: Some(1024),
+            backups: 1,
+        }),
+        workbuddy: vec![facts::WorkBuddyFacts {
+            variant: "国内版".to_string(),
+            installed: true,
+            running: true,
+            version: Some("5.11.3".to_string()),
+            auth_present: true,
+            auth_parseable: true,
+            auth_bytes: Some(2048),
+            account_count: Some(1),
+            token_kind: "信封".to_string(),
+        }],
+        ..Default::default()
+    };
+    let report = build_report(&input(), &base_sources(log, facts));
 
-    let report = build_report(
-        &input(),
-        &ReportSources {
-            error_log: log,
-            error_log_limit: DEFAULT_LOG_LINES,
-            settings: Some(json!({"configs": {"checkin": {"enabled": true, "days": 7}}})),
-            hook: Some(HookState {
-                installed: true,
-                registered_targets: 1,
-                total_targets: 3,
-            }),
-            store_writable: Some(true),
-            generated_at_ms: 1_700_000_000_123,
-        },
-    );
-
-    assert!(report.starts_with("WorkBuddy Shift 诊断包"));
     for needle in [
+        "[时间]",
         "[环境]",
+        "[WorkBuddy]",
         "[账号]",
+        "[凭据健康]",
+        "[刷新与保活]",
         "[客户端]",
-        "[权限]",
         "[限额 hook]",
-        "[设置项（只有键名与类型，不含取值）]",
+        "[会话关联]",
+        "[统计与自动化]",
+        "[设置摘要]",
+        "[凭据事件]",
         "[最近错误日志]",
-        "宿主标识: desktop",
-        "账号数量: 3 个（区间 1-5）",
-        "WorkBuddy: 已安装（版本 1.2.3）",
-        "CodeBuddy CLI: 未安装",
-        "已注册配置: 1/3 处",
-        "enabled: boolean",
-        "days: integer",
-        // 毫秒时间戳渲染成人能读的 UTC，而不是一串会被脱敏掉的数字。
-        "2023-11-14",
+        "[诊断生成]",
+        "生成时间: 2023-11-15 06:13:20 +08:00",
+        "#1 国内版",
+        "#2 国内版",
+        "token=明文",
+        "token=信封",
+        "探测超时（>800ms）",
+        "已注册配置: 1/2 处",
+        "5.11.3",
     ] {
         assert!(report.contains(needle), "报告缺少 {needle}：\n{report}");
     }
-
-    std::fs::remove_dir_all(&dir).expect("清理临时目录");
-}
-
-/// **核心回归**：往 `error.log` 与设置里注入真实形态的令牌 / 邮箱 / 路径 / uid，
-/// 断言脱敏输出里**一个原文片段都不出现**，同时键名与类型仍然可读。
-#[test]
-fn report_never_leaks_secrets_from_log_or_settings() {
-    let (dir, log) = temp_log("secrets");
-    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWFiYw";
-    let email = "alex.chen@example.com";
-    let home_path = "/Users/alex/Library/Application Support/WorkBuddy/auth.json";
-    let win_path = r"C:\Users\alex\AppData\Roaming\WorkBuddy\info.json";
-    let uuid = "3f2a1b4c-5d6e-7f80-9a1b-2c3d4e5f6071";
-    let gateway = "https://user:pass@gateway.internal/proxy/secret-path?token=abc";
-
-    write_log(
-        &log,
-        &[json!({
-            "ts": 1_700_000_000_123i64,
-            "kind": "backend",
-            "message": format!("读取 {home_path} 失败（{email}）"),
-            "detail": format!("Authorization: {jwt}\n写入 {win_path}\nsession {uuid}\nPOST {gateway}"),
-            "appVersion": "0.9.3",
-            "os": "macos",
-        })],
-    );
-
-    let settings = json!({
-        "version": 1,
-        "exportedAt": 1_700_000_000_123i64,
-        "configs": {
-            "checkin": {"enabled": true, "lastUid": 1_700_000_000_123i64},
-            "travel": {"note": email, "path": home_path},
-            "rotate": {"token": jwt},
-            "rateLimit": {"threshold": 1_700_000_000_123i64},
-        }
-    });
-
-    let report = build_report(
-        &input(),
-        &ReportSources {
-            error_log: log,
-            error_log_limit: DEFAULT_LOG_LINES,
-            settings: Some(settings),
-            hook: Some(HookState {
-                installed: false,
-                registered_targets: 0,
-                total_targets: 3,
-            }),
-            store_writable: Some(false),
-            generated_at_ms: 1_700_000_000_123,
-        },
-    );
-
+    // 头部含本地偏移。
+    assert!(report.contains("+08:00"), "头部应含本地偏移：\n{report}");
+    // 账号只以 #1/#2 出现，不出现身份。
     for secret in [
-        jwt,
-        email,
-        home_path,
-        win_path,
-        uuid,
-        gateway,
-        // URL 的 scheme + host 是**刻意保留**的（用户据此判断是哪家网关），
-        // 但 userinfo 里的口令与路径必须抹掉。
-        "user:pass",
-        "secret-path",
-        "alex.chen",
-        "Application Support",
-        "1700000000123",
+        "PLAINTEXT-SECRET-TOKEN-abcdef",
+        "REFRESH-SECRET-abcdef",
+        "ENVELOPE-BODY",
+        "leak@example.com",
+        "uid-123",
+        "私有昵称",
+        "/Users/alex/x.json",
+        "sk-secret-123",
     ] {
         assert!(
             !report.contains(secret),
             "诊断包泄漏了 {secret}：\n{report}"
         );
     }
-
-    // 脱敏不能把报告抹成空白：键名与类型这类「无机密」信息必须保留。
-    for needle in [
-        "checkin",
-        "enabled: boolean",
-        "threshold: integer",
-        "token: string",
-    ] {
-        assert!(report.contains(needle), "报告缺少 {needle}：\n{report}");
-    }
-    // 报告头必须自证「已脱敏」并给出替换计数。
-    assert!(report.contains("脱敏: 已替换 "), "\n{report}");
+    // 正文里不应出现 "账号 #3" 之类。
+    assert!(!report.contains("#3"));
 
     std::fs::remove_dir_all(&dir).expect("清理临时目录");
 }
 
-/// 读不到日志 / 读不到设置时也要出一份完整报告，只是对应分段写一行说明。
+/// 分段顺序固定（便于 diff，也是与本项目 issue 模板对齐的契约）。
 #[test]
-fn report_survives_missing_log_and_settings() {
+fn sections_are_in_fixed_order() {
+    const EXPECTED: [&str; 14] = [
+        "[时间]",
+        "[环境]",
+        "[WorkBuddy]",
+        "[账号]",
+        "[客户端]",
+        "[限额 hook]",
+        "[会话关联]",
+        "[统计与自动化]",
+        "[设置摘要]",
+        "[凭据事件]",
+        "[凭据健康]",
+        "[刷新与保活]",
+        "[最近错误日志]",
+        "[诊断生成]",
+    ];
+    let (dir, log) = temp_log("order");
+    write_log(&log, &[]);
+    let report = build_report(&input(), &base_sources(log, ReportFacts::default()));
+    let mut cursor = 0usize;
+    for section in EXPECTED {
+        let found = report[cursor..].find(section).unwrap_or_else(|| {
+            panic!("分段顺序错误：找不到 {section}（从 {cursor} 起）\n{report}")
+        });
+        cursor += found + section.len();
+    }
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 日志按 (kind,message) 聚合：重复项计一次并带 count。
+#[test]
+fn error_log_is_aggregated_with_count() {
+    let (dir, log) = temp_log("aggregate");
+    write_log(
+        &log,
+        &[
+            json!({"ts": 1_700_000_000_000i64, "kind": "backend", "message": "更新超时", "detail": "a"}),
+            json!({"ts": 1_700_000_000_100i64, "kind": "backend", "message": "更新超时", "detail": "b"}),
+            json!({"ts": 1_700_000_000_200i64, "kind": "backend", "message": "更新超时", "detail": "c"}),
+            json!({"ts": 1_700_000_000_300i64, "kind": "frontend_crash", "message": "渲染崩溃", "detail": ""}),
+        ],
+    );
+    let report = build_report(&input(), &base_sources(log, ReportFacts::default()));
+    assert!(
+        report.contains("更新超时") && report.contains("×3"),
+        "重复日志应聚合计数：\n{report}"
+    );
+    // 另一条不同 (kind,message) 不计数。
+    assert!(report.contains("渲染崩溃"), "\n{report}");
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 非 JSON 日志行（旧版本直接写纯文本）仍要出现在报告里，且被脱敏；
+/// 不允许出现「kind=backend、message 为空」的空壳行。
+#[test]
+fn raw_log_lines_stay_visible_and_masked() {
+    let (dir, log) = temp_log("raw");
+    std::fs::write(
+        &log,
+        "\"panic at C:/Users/alex/app.log\"\nnot json at /home/alex/x\n",
+    )
+    .expect("写入临时日志");
+    let report = build_report(&input(), &base_sources(log, ReportFacts::default()));
+    assert!(report.contains("[raw]"), "原生行应单独成组：\n{report}");
+    assert!(report.contains("panic at"), "\n{report}");
+    assert!(
+        !report.contains("C:/Users/alex"),
+        "路径应被脱敏：\n{report}"
+    );
+    assert!(!report.contains("/home/alex"), "路径应被脱敏：\n{report}");
+    // 不应出现空的 backend 行（旧实现的 bug）。
+    assert!(
+        !report
+            .lines()
+            .any(|line| line.trim() == "[backend]  时间未知"),
+        "出现了空壳日志行：\n{report}"
+    );
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 日志窗口固定在最近 [`DEFAULT_LOG_LINES`] 条（更早的丢弃）。
+#[test]
+fn error_log_window_keeps_last_fifty_lines() {
+    let (dir, log) = temp_log("window");
+    let lines: Vec<serde_json::Value> = (0..60)
+        .map(|i| {
+            json!({
+                "ts": 1_700_000_000_000i64 + i * 1_000,
+                "kind": "backend",
+                "message": format!("事件-{i:02}"),
+                "detail": "",
+            })
+        })
+        .collect();
+    write_log(&log, &lines);
+    let report = build_report(&input(), &base_sources(log, ReportFacts::default()));
+    // 最近 50 条 = 事件-10 .. 事件-59；更早的 0..9 必须被丢掉。
+    assert!(report.contains("事件-59"), "\n{report}");
+    assert!(report.contains("事件-10"), "\n{report}");
+    assert!(
+        !report.contains("事件-09"),
+        "超出窗口的日志不应出现：\n{report}"
+    );
+    assert!(
+        report.contains("回看: 最近 50 条"),
+        "应写明回看条数：\n{report}"
+    );
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 报告超过 4 MiB 上限时省略日志段并注明，绝不返回超限内容。
+#[test]
+fn oversized_report_drops_log_section_with_note() {
+    let (dir, log) = temp_log("oversize");
+    let huge = "x".repeat(MAX_REPORT_BYTES + 1024);
+    write_log(
+        &log,
+        &[
+            json!({"ts": 1_700_000_000_000i64, "kind": "backend", "message": "巨型日志", "detail": huge}),
+        ],
+    );
+    let report = build_report(&input(), &base_sources(log, ReportFacts::default()));
+    assert!(
+        report.len() <= MAX_REPORT_BYTES,
+        "报告 {} 字节超过上限 {}",
+        report.len(),
+        MAX_REPORT_BYTES
+    );
+    assert!(
+        report.contains("本段整体省略"),
+        "应注明日志段被截断：\n{}",
+        &report[..report.len().min(2000)]
+    );
+    assert!(!report.contains("巨型日志"), "超限日志不应出现");
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+}
+
+/// 读不到日志 / 读不到 hook / 未探测目录时也要出完整报告，只写降级说明。
+#[test]
+fn report_survives_missing_inputs() {
     let report = build_report(
         &ReportInput::new(HostForm::WebUi, "en-US", 0),
         &ReportSources {
             error_log: std::env::temp_dir().join("workbuddy-shift-does-not-exist.log"),
             error_log_limit: DEFAULT_LOG_LINES,
-            settings: None,
             hook: None,
             store_writable: None,
             generated_at_ms: 0,
+            utc_offset_seconds: 0,
+            facts: ReportFacts::default(),
         },
     );
     assert!(report.contains("（没有日志文件，或读不出来）"));
-    assert!(report.contains("（读取失败）"));
+    assert!(report.contains("状态: 读取失败"));
     assert!(report.contains("未探测"));
     assert!(report.contains("（未提供探测结果）"));
     assert!(report.contains("宿主标识: webui"));
-    assert!(report.contains("账号数量: 0 个（区间 0）"));
+    assert!(report.contains("账号数量: 0 个"));
+    assert!(report.contains("credential: 未配置"));
+    assert!(report.contains("会话关联") && report.contains("无记录"));
 }
 
-/// 日志条数上限生效：只回看最后 N 条（最老的那条不出现）。
+/// hook 状态投影：只保留标签 / 布尔 / 计数。
 #[test]
-fn report_keeps_only_the_tail_of_the_log() {
-    let (dir, log) = temp_log("tail");
-    let lines: Vec<serde_json::Value> = (0..5)
-        .map(|index| {
-            json!({
-                "ts": 1_700_000_000_000i64 + index,
-                "kind": "backend",
-                "message": format!("第 {index} 条"),
-                "detail": "",
-                "appVersion": "0.9.3",
-                "os": "macos",
-            })
-        })
-        .collect();
-    write_log(&log, &lines);
-
-    let report = build_report(
-        &input(),
-        &ReportSources {
-            error_log: log,
-            error_log_limit: 2,
-            settings: None,
-            hook: None,
-            store_writable: Some(true),
-            generated_at_ms: 0,
-        },
-    );
-    assert!(report.contains("第 4 条"));
-    assert!(report.contains("第 3 条"));
-    assert!(!report.contains("第 0 条"));
-    assert!(!report.contains("第 1 条"));
-
-    std::fs::remove_dir_all(&dir).expect("清理临时目录");
+fn hook_state_projection_counts_targets() {
+    let status = json!({
+        "installed": true,
+        "scriptExists": true,
+        "targets": [
+            {"label": "A", "path": "/secret/a", "exists": true, "installed": true},
+            {"label": "B", "path": "/secret/b", "exists": false, "installed": false},
+        ]
+    });
+    let hook = hook_state_from_status(&status).expect("some");
+    assert!(hook.installed);
+    assert!(hook.script_exists);
+    assert_eq!(hook.total_targets, 2);
+    assert_eq!(hook.registered_targets, 1);
+    assert_eq!(hook.targets[0].label, "A");
 }
 
-/// 账号数量分桶（报告里只出现区间，不出明细）。
+/// 并行探测：快 / 慢（超时）/ panic 三个假 probe，断言超时项、耗时、顺序稳定、panic 不传播。
+#[test]
+fn probe_clients_parallel_timeout_and_panic() {
+    let specs = vec![
+        ProbeSpec::new("fast", || json!({"installed": true, "version": "1.0.0"})),
+        ProbeSpec::new("slow", || {
+            std::thread::sleep(Duration::from_millis(300));
+            json!({"installed": true})
+        }),
+        ProbeSpec::new("boom", || panic!("probe exploded")),
+    ];
+    let probes = probe_clients(specs, 80);
+    assert_eq!(probes.len(), 3);
+    // 顺序稳定。
+    assert_eq!(probes[0].name, "fast");
+    assert_eq!(probes[1].name, "slow");
+    assert_eq!(probes[2].name, "boom");
+    // 快的正常、慢的超时、panic 记为 error。
+    assert_eq!(probes[0].probe_status, ProbeStatus::Ok);
+    assert!(probes[0].installed);
+    assert_eq!(probes[1].probe_status, ProbeStatus::Timeout);
+    assert_eq!(probes[2].probe_status, ProbeStatus::Error);
+    // 耗时字段存在；超时项耗时等于阈值。
+    assert!(probes[0].elapsed_ms.is_some());
+    assert_eq!(probes[1].elapsed_ms, Some(80));
+}
+
+/// 账号数量分桶（保留旧入口）。
 #[test]
 fn account_bucket_covers_boundaries() {
     assert_eq!(account_bucket(0), "0");
@@ -271,9 +445,7 @@ fn save_report_validates_path_and_size() {
     assert_eq!(saved["bytes"], json!("诊断内容".len()));
     assert_eq!(std::fs::read_to_string(&target).expect("读回"), "诊断内容");
 
-    // `.md` 也允许（同样是纯文本）。
     assert!(save_report(&dir.join("d.md").to_string_lossy(), "x").is_ok());
-
     assert!(save_report("", "x").is_err());
     assert!(save_report(&dir.join("d.csv").to_string_lossy(), "x")
         .expect_err("csv 不在白名单")
@@ -286,10 +458,100 @@ fn save_report_validates_path_and_size() {
     std::fs::remove_dir_all(&dir).expect("清理临时目录");
 }
 
-/// 脱敏入口对整份报告文本同样成立（防止将来新增分段时忘了调用）。
+/// 脱敏入口对整份报告文本同样成立。
 #[test]
 fn redact_text_is_exposed_for_report_level_masking() {
     let masked = redact_text("路径 /Users/alex/x 与 alex@example.com");
     assert!(!masked.contains("/Users/alex"));
     assert!(!masked.contains("alex@example.com"));
+}
+
+/// 凭据健康事实里的枚举标签（不依赖真实账号）。
+#[test]
+fn account_fact_state_labels() {
+    let fact = AccountFact {
+        index: 1,
+        variant: "国内版".to_string(),
+        source: "oauth".to_string(),
+        source_inferred: false,
+        token_kind: TokenKind::Plain,
+        access: AccessState::Valid(5 * 3_600_000),
+        refresh: TokenKind::Plain,
+        refresh_expired: false,
+        relogin: ReloginState { needed: false },
+        enterprise: false,
+        has_note: false,
+        age_ms: None,
+        last_event: None,
+    };
+    assert_eq!(fact.access.label(), "有效(剩余 5h)");
+    assert_eq!(fact.relogin.label(), "否");
+    assert_eq!(fact.token_kind.label(), "明文");
+    assert_eq!(fact.token_kind.refresh_label(), "有");
+    assert_eq!(TokenKind::Envelope.refresh_label(), "信封");
+    assert_eq!(TokenKind::Missing.refresh_label(), "缺失");
+}
+
+/// `[凭据健康]` 每行字段齐全（含 refresh 是否过期），且不含身份信息。
+#[test]
+fn credential_health_line_lists_states_without_identity() {
+    let now = 1_700_000_000_000i64;
+    let accounts = vec![json!({
+        "access_token": "ACCESS-SECRET",
+        "refresh_token": "REFRESH-SECRET",
+        "expiresAt": now + 5 * 3_600_000i64,
+        "refreshTokenExpiresAt": now - 3_600_000i64,
+        "credentialSource": "oauth",
+        "variant": "cn",
+        "uid": "uid-9",
+        "email": "who@example.com",
+        "nickname": "昵称",
+    })];
+    let mut account_facts = facts::account_facts(&accounts, now);
+    facts::attach_account_events(
+        &mut account_facts,
+        &[facts::CredentialEvent {
+            ts: now - 2 * 3_600_000,
+            account: 1,
+            variant: "cn".to_string(),
+            action: "refreshed".to_string(),
+            reason: "ok".to_string(),
+        }],
+        now,
+    );
+    let (dir, log) = temp_log("cred-health");
+    std::fs::write(&log, "").expect("空日志");
+    let report_facts = ReportFacts {
+        accounts: account_facts,
+        ..Default::default()
+    };
+    let report = build_report(&input(), &base_sources(log, report_facts));
+    let line = report
+        .lines()
+        .find(|line| line.trim_start().starts_with("#1 "))
+        .unwrap_or_else(|| panic!("缺少 #1 行：\n{report}"));
+    for needle in [
+        "#1 国内版",
+        "来源=oauth",
+        "token=明文",
+        "access=有效(剩余 5h)",
+        "refresh=有(已过期)",
+        "需重登=否",
+        "最近刷新=refreshed(2h 前)",
+    ] {
+        assert!(line.contains(needle), "凭据健康行缺少 {needle}：{line}");
+    }
+    for secret in [
+        "ACCESS-SECRET",
+        "REFRESH-SECRET",
+        "uid-9",
+        "who@example.com",
+        "昵称",
+    ] {
+        assert!(
+            !report.contains(secret),
+            "诊断包泄漏了 {secret}：\n{report}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).expect("清理临时目录");
 }

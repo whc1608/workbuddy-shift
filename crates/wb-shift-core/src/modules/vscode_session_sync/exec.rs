@@ -1,18 +1,39 @@
 //! 同步执行：快进/覆盖、索引与基线提交、目录合并与文件复制。
 
+use crate::modules::usage_origin;
+
 use super::*;
 
 /// 按模式执行写入。
+///
+/// R6-07 写入点 4/4：`fast_forward` / `overwrite` 成功后在这里统一记一次归属交接。
+/// `codebuddy_ide_session_sync` 委托到 `sync_selected_in_for_variant`，最终也走本函数，
+/// 因此**只埋一次**，避免双写。
 pub(super) fn execute_sync_item(
     paths: &SessionPaths,
     plan: &SyncItemPlan,
 ) -> Result<Value, String> {
-    match plan.mode {
-        SyncMode::FastForward => fast_forward(paths, plan),
-        SyncMode::Overwrite | SyncMode::UnifyOverwrite => overwrite(paths, plan),
+    let mode = plan.mode;
+    let value = match mode {
+        SyncMode::FastForward => fast_forward(paths, plan)?,
+        SyncMode::Overwrite | SyncMode::UnifyOverwrite => overwrite(paths, plan)?,
         // 插件侧没有 sessions 表、不感知归档状态，永不产生状态同步计划。
-        SyncMode::StatusOnly => Err("当前客户端不支持仅同步归档，已拒绝".to_string()),
+        SyncMode::StatusOnly => return Err("当前客户端不支持仅同步归档，已拒绝".to_string()),
+    };
+    // 走到这里说明正文与基线都已落盘。失败只记日志：索引写不进去最多让归属回退到
+    // 文件自身 uid，绝不能把一次已经成功的同步报告成失败。
+    if let Some(namespace) = plan.ns {
+        usage_origin::record_sync_quiet(
+            &paths.store_root,
+            namespace,
+            &plan.target_conversation_id,
+            namespace,
+            &plan.source_conversation_id,
+            now_ms(),
+            &plan.source_member.uid,
+        );
     }
+    Ok(value)
 }
 
 /// 一条待写入的副本消息文件。

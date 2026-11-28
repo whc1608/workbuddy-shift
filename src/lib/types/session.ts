@@ -65,7 +65,10 @@ export interface CopyResult {
    */
   sourceRepaired?: string;
   /**
-   * 目标客户端缺账本表/列，副本不含会话用量（「共消耗」仍会偏少）。不算失败，只说明原因。
+   * 目标客户端缺账本表/列，副本不含会话用量。不算失败，只说明原因。
+   *
+   * R6-08：复制**默认不再搬历史消耗**（历史消耗归来源账号，副本只记录自己的新增），
+   * 所以副本的「共消耗」显示 0 或偏少都属于预期；账号级消耗请看「积分统计」。
    */
   auxNote?: string;
   /**
@@ -114,11 +117,19 @@ export interface SessionCopyReport {
   /**
    * 有会话因「账本（用量 + 中断记录）写入失败」而整次失败时为 true：
    * 前端据此给「仍然复制（不带用量与中断记录）」的显式忽略入口。
+   *
+   * R6-08 起正常复制路径就不再搬 `session_usage`，这个入口只剩**失败兜底**一种用途
+   * （让用户先拿到正文）；旧后端仍可能下发该字段，前端保持兼容。
    */
   canIgnoreAux?: boolean;
   /** 可忽略失败的会话 id（与 `errors` 一一对应，仅供「仍然复制」按钮使用）。 */
   auxFailed?: string[];
-  /** 本次请求带了显式忽略：副本永久不含账本，不会后台补写。 */
+  /**
+   * 本次请求带了显式忽略：副本不含历史消耗，不会后台补写。
+   *
+   * R6-08：正常复制的默认行为已经是「不搬历史消耗」（历史消耗归来源账号，
+   * 副本只记录自己的新增），副本的「共消耗」显示 0 或偏少都属于预期。
+   */
   auxSkipped?: boolean;
   /** 本次请求由恢复重放补完的会话 id（重试「仍然复制」时它们不会出现在 copied 里）。 */
   recovered?: string[];
@@ -445,4 +456,28 @@ export interface SessionGroupActionReport {
   restartedEditor?: boolean;
   /** 插件侧：写入已完成但 VS Code 未能自动重新打开（无 `errors` 数组的入口用它兜底）。 */
   editorError?: string;
+}
+
+/** 一条未完成的会话写入（设置页「未完成的写入」）。 */
+export interface PendingSessionWrite {
+  operationId: string;
+  /** `sync`（同步）或 `copy`（复制）。 */
+  kind: string;
+  targetSessionId: string;
+  /** 目标会话标题；会话行已不存在时为 `null`。 */
+  title: string | null;
+  variant: WbVariant;
+  updatedAt: number;
+  lastError: string | null;
+  /** 是否可「结束这次写入」：复制的中断记录牵涉新建的会话行，不提供。 */
+  discardable: boolean;
+}
+
+/** 「结束这次写入」的结果。 */
+export interface DiscardedSessionWrite {
+  operationId: string;
+  /** 是否保留了备份（`true` 时维护入口会继续把这条备份列为待确认）。 */
+  backupKept: boolean;
+  /** 结束后的状态说明，可直接展示。 */
+  note: string;
 }

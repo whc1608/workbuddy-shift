@@ -53,6 +53,7 @@ use crate::modules::variant::WbVariant;
 // 同步预览与计划（sync）、备份与执行（exec）、未完成操作恢复（recovery）。
 // 公共入口统一在下方 re-export，外部仍按 `session::` 使用。
 mod copy;
+mod discard;
 mod exec;
 mod paths;
 mod query;
@@ -73,6 +74,10 @@ pub(crate) use query::{
     current_user_uid_at, find_project_jsonl, list_sessions_for_user_at, open_db, table_exists,
 };
 // 会话行存活索引与「组内是否还有存活成员」判定：`session_groups` 的列表过滤与批量清理复用。
+pub use discard::{
+    discard_unfinished_sync, pending_session_operations, pending_session_operations_with,
+    DiscardedOperation, PendingWrite,
+};
 pub(crate) use query::LiveSessionRows;
 pub(crate) use recovery::recover_pending_session_operations;
 pub use run::sync_sessions_cross;

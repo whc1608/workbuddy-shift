@@ -2,16 +2,20 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { formatAmount } from "@/lib/format";
+import { useCreditBarTones } from "@/lib/credit-bar-palette";
 import type { StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditOfficialUsage,
   CreditOfficialUsageModel,
 } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 import { AccountFilterMenu } from "./account-filter-menu";
 import { formatPercent, rangeModels } from "./data";
 
 function ModelBreakdownRows({ models }: { models: CreditOfficialUsageModel[] }) {
+  // 正常可用态的配色跟随「设置 → 外观 → 积分条状态色」（默认主题蓝）。
+  const tones = useCreditBarTones();
   const totalCredit = models.reduce((sum, model) => sum + model.credit, 0);
   const totalRequests = models.reduce((sum, model) => sum + model.requestCount, 0);
 
@@ -32,7 +36,7 @@ function ModelBreakdownRows({ models }: { models: CreditOfficialUsageModel[] }) 
               </span>
             </div>
             <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-              <div className="h-full rounded-full bg-emerald-500/75" style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }} />
+              <div className={cn("h-full rounded-full", tones.normal)} style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }} />
             </div>
           </div>
         );

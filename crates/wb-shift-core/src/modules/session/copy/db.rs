@@ -51,6 +51,13 @@ pub(in crate::modules::session) const AUX_WRITE_FAILED_PREFIX: &str = "会话用
 /// 目标客户端不支持会话账本时的诊断文案（旧版库缺表/缺列）。
 const AUX_UNSUPPORTED_NOTE: &str = "目标客户端不支持会话用量记录，副本不含账本";
 
+/// R6-08：默认口径（`copy_usage = false`）下随复制报告返回的说明。
+///
+/// 副本的「共消耗」会显示 0/偏少，必须让用户知道这是**设计如此**（历史消耗留在来源
+/// 账号），否则会以为丢数据。
+pub(in crate::modules::session) const AUX_USAGE_LEFT_IN_SOURCE_NOTE: &str =
+    "历史消耗归来源账号，副本只记录自己的新增";
+
 /// 该错误是否属于可以「显式忽略」的账本写入失败。
 pub(in crate::modules::session) fn is_aux_write_failure(error: &str) -> bool {
     error.starts_with(AUX_WRITE_FAILED_PREFIX)
@@ -81,13 +88,20 @@ fn aux_error(error: &rusqlite::Error) -> String {
     format!("{AUX_WRITE_FAILED_PREFIX}{error}")
 }
 
-/// 读取源会话的账本。
+/// 按开关裁剪地读账本：`want_usage = false` 时**根本不查** `session_usage`
+/// （R6-08 的「不搬历史消耗」从数据源头保证，而不是读了再丢）。
 ///
 /// 三种「没有数据可搬」的情况返回空账本而不是失败：表不存在、缺关键列、该会话无行
 /// （旧库/未产生用量）。表存在但查询报错才算失败——那种情况静默跳过会让副本悄悄少数据。
-fn read_session_aux(conn: &Connection, sid: &str) -> Result<SessionAux, String> {
+fn read_session_aux_filtered(
+    conn: &Connection,
+    sid: &str,
+    want_usage: bool,
+    want_interruptions: bool,
+) -> Result<SessionAux, String> {
     let mut aux = SessionAux::default();
-    if table_exists(conn, "session_usage")
+    if want_usage
+        && table_exists(conn, "session_usage")
         && column_exists(conn, "session_usage", "used")
         && column_exists(conn, "session_usage", "size")
         && column_exists(conn, "session_usage", "credit_json")
@@ -108,7 +122,8 @@ fn read_session_aux(conn: &Connection, sid: &str) -> Result<SessionAux, String> 
             Err(error) => return Err(aux_error(&error)),
         }
     }
-    if table_exists(conn, "session_turn_interruptions")
+    if want_interruptions
+        && table_exists(conn, "session_turn_interruptions")
         && column_exists(conn, "session_turn_interruptions", "request_id")
     {
         let has_reason = column_exists(conn, "session_turn_interruptions", "reason_code");
@@ -140,31 +155,61 @@ fn read_session_aux(conn: &Connection, sid: &str) -> Result<SessionAux, String> 
     Ok(aux)
 }
 
+/// `copy_usage = false` 时副本写的零值行内容（`used = 0`, `size = 0`, `credit_json = '{}'`）。
+///
+/// R6-08 的取舍：**写零值行而不是不写行**。客户端会话详情的「共消耗」直接读
+/// `session_usage`，历史版本对「副本没有这一行」的行为未经验证（可能显示异常/NaN）；
+/// 零值行是只增不改的占位——`ON CONFLICT DO NOTHING` 保证它**绝不会**覆盖客户端
+/// 复制后自己写下的真实用量。这是「绝不写来源数值」的延伸。
+const WRITE_ZERO_USAGE_ROW: bool = true;
+
+/// 零值行的 `credit_json`：空对象（不是 `NULL`，避免客户端按「无字段」解析失败）。
+const ZERO_USAGE_CREDIT_JSON: &str = "{}";
+
 /// 在写事务内搬运账本；目标库缺表/缺列时跳过并返回 `false`（不算失败）。
 ///
 /// 本函数只写两张账本表：不碰 `automations` / `automation_runs` / `workspaces` /
 /// `cloud_sync_ledger`，也不改写 `credit_json` 的键与数值（原样搬运，不重算不取整）。
+///
+/// R6-08：`copy_usage = false`（默认）时**绝不写来源数值**——历史消耗留在来源账号，
+/// 副本只累计自己的新增（「谁用的记在谁头上」）。
 fn write_session_aux(
     tx: &rusqlite::Transaction<'_>,
     sid: &str,
     aux: &SessionAux,
     now: i64,
+    copy_usage: bool,
 ) -> Result<bool, String> {
     let mut supported = true;
-    if let Some(usage) = &aux.usage {
-        let usable = table_exists(tx, "session_usage")
-            && column_exists(tx, "session_usage", "used")
-            && column_exists(tx, "session_usage", "size")
-            && column_exists(tx, "session_usage", "updated_at")
-            && column_exists(tx, "session_usage", "credit_json");
-        if usable {
+    let usage_usable = table_exists(tx, "session_usage")
+        && column_exists(tx, "session_usage", "used")
+        && column_exists(tx, "session_usage", "size")
+        && column_exists(tx, "session_usage", "updated_at")
+        && column_exists(tx, "session_usage", "credit_json");
+    if copy_usage {
+        if let Some(usage) = &aux.usage {
+            if usage_usable {
+                tx.execute(
+                    "INSERT INTO session_usage (session_id, used, size, updated_at, credit_json) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT(session_id) DO UPDATE SET \
+                       used = excluded.used, size = excluded.size, \
+                       updated_at = excluded.updated_at, credit_json = excluded.credit_json",
+                    rusqlite::params![sid, usage.used, usage.size, now, usage.credit_json],
+                )
+                .map_err(|e| aux_error(&e))?;
+            } else {
+                supported = false;
+            }
+        }
+    } else if WRITE_ZERO_USAGE_ROW {
+        // 「谁用的记在谁头上」：只给客户端一个「行存在」的占位，值恒为零。
+        if usage_usable {
             tx.execute(
                 "INSERT INTO session_usage (session_id, used, size, updated_at, credit_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) \
-                 ON CONFLICT(session_id) DO UPDATE SET \
-                   used = excluded.used, size = excluded.size, \
-                   updated_at = excluded.updated_at, credit_json = excluded.credit_json",
-                rusqlite::params![sid, usage.used, usage.size, now, usage.credit_json],
+                 VALUES (?1, 0, 0, ?2, ?3) \
+                 ON CONFLICT(session_id) DO NOTHING",
+                rusqlite::params![sid, now, ZERO_USAGE_CREDIT_JSON],
             )
             .map_err(|e| aux_error(&e))?;
         } else {
@@ -293,6 +338,8 @@ pub(in crate::modules::session) fn insert_session_copy(
     source_uid: &str,
     target_uid: &str,
     ignore_aux: bool,
+    copy_usage: bool,
+    copy_interruptions: bool,
     body_latest_at: Option<i64>,
 ) -> Result<DbCopyOutcome, String> {
     let dst_db = target_paths.workbuddy_db();
@@ -311,10 +358,11 @@ pub(in crate::modules::session) fn insert_session_copy(
         }
         let row = read_source_session_row(&conn, cid, source_uid)?;
         // 账本与 sessions 行同源读取：行缺失时不必再读，忽略模式下降级为不搬。
+        // R6-08：`copy_usage = false` 时**根本不查** `session_usage`（从源头保证不搬）。
         let aux = if ignore_aux || row.is_none() {
             SessionAux::default()
         } else {
-            read_session_aux(&conn, cid)?
+            read_session_aux_filtered(&conn, cid, copy_usage, copy_interruptions)?
         };
         (row, aux)
     } else {
@@ -437,8 +485,15 @@ pub(in crate::modules::session) fn insert_session_copy(
         // 显式忽略是**不可逆**选择：该会话永久不带账本，不做后台补写。
         None
     } else {
-        let supported = write_session_aux(&tx, new_cid, &source_aux, copy_now)?;
-        (!supported).then_some(AUX_UNSUPPORTED_NOTE)
+        // `copy_usage = false` 时 `write_session_aux` 只写零值行（`ON CONFLICT DO NOTHING`），
+        // 绝不写来源数值；返回值仍是「目标库的账本表是否可用」。
+        let supported = write_session_aux(&tx, new_cid, &source_aux, copy_now, copy_usage)?;
+        if copy_usage {
+            (!supported).then_some(AUX_UNSUPPORTED_NOTE)
+        } else {
+            // R6-08：不是失败，只是口径变化——必须告诉用户「共消耗」为什么是 0/偏少。
+            Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE)
+        }
     };
     tx.commit().map_err(|e| format!("会话记录保存失败：{e}"))?;
     Ok(DbCopyOutcome::Inserted {

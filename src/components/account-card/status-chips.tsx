@@ -39,6 +39,23 @@ import { selectCompactStatusChips, STATUS_PRIORITY, type StatusChipDescriptor } 
 export { chipClass };
 
 /**
+ * 「删除该账号后重新 OAuth 扫码」——账号真的失效时**唯一**的恢复路径（R6-05 / R6-02 共用）。
+ *
+ * 不能再写「从本机导入」：UI 早已没有这个入口（`importLocal` 只剩定义、无调用方），
+ * 而且信封账号即使重新导入本机登录态，拿到的仍然是信封，救不回来。
+ */
+const OAUTH_RELOGIN_RECOVERY = "删除该账号后重新 OAuth 扫码";
+
+/** 「需重新登录 / Token 已过期」chip 的 hover 说明（R6-05）。 */
+export const RELOGIN_RECOVERY_HINT = `若客户端仍可正常使用，请${OAUTH_RELOGIN_RECOVERY}`;
+
+/** 信封（加密）凭据账号的状态 chip 文案（R6-02）。 */
+export const ENCRYPTED_CREDENTIAL_LABEL = "凭据已加密";
+
+/** 上面那个 chip 的 hover 说明：两条恢复路径中，能读本机客户端凭据时不必重登（R6-02）。 */
+export const ENCRYPTED_CREDENTIAL_HINT = `可用本机客户端凭据读取，或${OAUTH_RELOGIN_RECOVERY}`;
+
+/**
  * 卡片头部的状态 chip 区：标记 / 企业版 / 签到 / 旅行 / 最近切换 / 限额 / 失效 /
  * 建议优先 / 多端在用。
  *
@@ -179,23 +196,41 @@ export function AccountStatusChips({
     });
   }
 
-  // 8）需重新登录 / Token 已过期（阻断使用）。
-  // T01：「需重新登录」多是本工具与官方客户端抢刷同一份 refresh token 的结果，客户端往往
-  // 仍能正常使用，真实恢复路径是「从本机导入」（把客户端手上的新凭据读回账号库）。
+  // 8）凭据形态（R6-02）/ 需重新登录 / Token 已过期。
+  // R6-02：信封（加密）凭据的账号不是坏了，只是本工具读不到明文，历史上却被误标成
+  // `needsRelogin`。这类账号改显示「凭据已加密」，不再显示「需重新登录」；
+  // 与 R6-05 的失效提示共用 `OAUTH_RELOGIN_RECOVERY`，避免两处文案再漂移。
   // 提示只挂在 `title` 上：肉眼看到的仍是同一个 chip，视觉结构不变。
-  const reloginLabel = account.needsRelogin
-    ? "需重新登录"
-    : typeof account.expiresAt === "number" && account.expiresAt < Date.now()
-      ? "Token 已过期"
-      : null;
-  if (reloginLabel) {
-    const hint = "若客户端仍可正常使用，请用『从本机导入』恢复";
+  if (account.credentialKind === "envelope") {
     chips.push({
-      key: "relogin",
-      priority: STATUS_PRIORITY.relogin,
-      detail: reloginLabel,
-      node: <Badge variant="warning" className={chipClass} title={hint}>{reloginLabel}</Badge>,
+      key: "credential",
+      priority: STATUS_PRIORITY.credential,
+      detail: ENCRYPTED_CREDENTIAL_LABEL,
+      node: (
+        <Badge variant="secondary" className={chipClass} title={ENCRYPTED_CREDENTIAL_HINT}>
+          {ENCRYPTED_CREDENTIAL_LABEL}
+        </Badge>
+      ),
     });
+  } else {
+    // `credentialKind` 缺省（旧后端 / 旧快照）与 `plain` / `missing` 都走这里：行为与改造前一致。
+    const reloginLabel = account.needsRelogin
+      ? "需重新登录"
+      : typeof account.expiresAt === "number" && account.expiresAt < Date.now()
+        ? "Token 已过期"
+        : null;
+    if (reloginLabel) {
+      chips.push({
+        key: "relogin",
+        priority: STATUS_PRIORITY.relogin,
+        detail: reloginLabel,
+        node: (
+          <Badge variant="warning" className={chipClass} title={RELOGIN_RECOVERY_HINT}>
+            {reloginLabel}
+          </Badge>
+        ),
+      });
+    }
   }
 
   // 9）建议优先使用（有即将到期积分）。

@@ -170,6 +170,10 @@
             // 否则每导入一次旧备份，卡片上的「最近切换」徽标就会集体消失。
             "lastUsedAt" => json!(1_763_654_321_000_i64),
             "lastUsedClient" => json!("codebuddy-ide"),
+            // R6-01：导入路径**不**继承本机来源（备份没有等价信息），见
+            // `merge_marks_missing_credential_source_as_import`；这里保留样例值只为
+            // 让「白名单新增字段必须补样例」这条不变量继续成立。
+            "credentialSource" => json!("local"),
             other => panic!(
                 "LOCAL_ACCOUNT_FIELDS 新增了 `{other}`，请在导入侧不变量测试里补样例值，\
                  并确认旧备份导入不会覆盖它"
@@ -180,6 +184,12 @@
     #[test]
     fn merge_keeps_every_local_account_field_from_old_backup() {
         for key in account::LOCAL_ACCOUNT_FIELDS {
+            // `credentialSource` 是**有意**的例外：备份里没有等价信息（另一台机器的来源
+            // 不可知），按 R6-01 的口径统一补 `import`，不做本机值继承。
+            // 该字段的导入语义由下面两条专门用例钉住。
+            if key == account::CREDENTIAL_SOURCE_FIELD {
+                continue;
+            }
             let mut local = record("local", Some("u1"), "旧名称", None, true);
             local[key] = local_field_sample(key);
             let mut accounts = vec![local];
@@ -196,6 +206,41 @@
             );
             assert_eq!(accounts[0]["nickname"], "新名称", "官方字段仍以备份为准");
         }
+    }
+
+    /// R6-01：备份没有 `credentialSource`（旧备份 / 第三方号池）时，导入落 `import`。
+    ///
+    /// 保守档的理由写在 `account::CredentialSource`：判成 `oauth` 会让本工具用导入的旧
+    /// refresh token 去刷，把另一台机器上的客户端顶掉；判成 `import` 最坏只是「明文过期后
+    /// 不再自动刷新、提示重扫」，可恢复。
+    #[test]
+    fn merge_marks_missing_credential_source_as_import() {
+        // 追加分支（跨机导入的新账号）。
+        let mut accounts: Vec<Value> = vec![];
+        let text = r#"[{ "id": "n1", "uid": "u9", "access_token": "tok" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(accounts[0]["credentialSource"], "import");
+
+        // 覆盖分支（同 uid 覆盖本地记录）：同样落 `import`，不继承本机来源。
+        let mut accounts = vec![record("local", Some("u1"), "旧名称", None, true)];
+        accounts[0]["credentialSource"] = json!("oauth");
+        let text = r#"[{ "id": "local", "uid": "u1", "access_token": "tok-new" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(
+            accounts[0]["credentialSource"], "import",
+            "备份没带来源时一律按 import（不猜）"
+        );
+    }
+
+    /// R6-01：备份自带 `credentialSource` 时原样保留（导出/导入往返不改口径）。
+    #[test]
+    fn merge_keeps_credential_source_from_backup() {
+        let mut accounts = vec![record("local", Some("u1"), "旧名称", None, true)];
+        accounts[0]["credentialSource"] = json!("local");
+        let text = r#"[{ "id": "local", "uid": "u1", "access_token": "tok-new",
+            "credentialSource": "oauth" }]"#;
+        merge_import_records(&mut accounts, text, &[0]).unwrap();
+        assert_eq!(accounts[0]["credentialSource"], "oauth");
     }
 
     #[test]

@@ -334,6 +334,22 @@ fn copy(env: &Env, target_uid: &str, ids: &[&str]) -> Value {
 
 // ---- 旧签名 shim（测试专用） ----
 
+/// 显式打开「连账本一起复制」（R6-08 之前的旧口径）的复制入口。
+///
+/// 只有验证「开关打开时账本仍逐字搬运」的用例用它；生产默认口径恒为不搬。
+fn copy_with_usage(env: &Env, target_uid: &str, ids: &[&str]) -> Value {
+    let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    copy_sessions_for_switch_at_with_options(
+        &env.paths(),
+        WbVariant::Cn,
+        &env.target(target_uid),
+        &ids,
+        CopyOptions::new(false, false).with_copy_usage(true),
+        |_| false,
+    )
+    .unwrap()
+}
+
 /// `copy_sessions_for_switch_at` 的旧签名（`ignore_aux: bool`）包装：多数用例只关心
 /// 「不忽略账本」，不必每处都写 `CopyOptions`（生产侧统一走 `*_with_options`）。
 fn copy_sessions_for_switch_at(

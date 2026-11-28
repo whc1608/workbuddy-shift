@@ -76,7 +76,9 @@ pub(crate) use preview::{
 };
 // 旧公开路径：其它模块的单测仍按 `session_link::X` 取该常量（生产路径不直接使用）。
 pub use preview::PREVIEW_TOKEN_VERSION;
-pub(crate) use sync_decision::{decide_sync, SyncDecision, SyncMode, SyncVerdict};
+pub(crate) use sync_decision::{
+    decide_sync, unverifiable_sides, SyncDecision, SyncMode, SyncVerdict,
+};
 
 #[cfg(test)]
 mod tests;

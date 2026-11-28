@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { formatAmount } from "@/lib/format";
+import { useCreditBarTones } from "@/lib/credit-bar-palette";
 import type { StatsRangeKey } from "@/lib/stats-range";
 import type {
   CreditOfficialUsage,
@@ -9,6 +10,7 @@ import type {
   WbVariant,
 } from "@/lib/types";
 import { variantLabel } from "@/lib/variant";
+import { cn } from "@/lib/utils";
 
 import {
   accountUsageRows,
@@ -40,6 +42,8 @@ export function AccountUsageShare({
   heading?: boolean;
 }) {
   const official = isOfficialUsageAvailable(officialUsage) ? officialUsage : undefined;
+  // 正常可用态的配色跟随「设置 → 外观 → 积分条状态色」（默认主题蓝）。
+  const tones = useCreditBarTones();
 
   // 官方用量优先，不可用时回退本地观察口径（与总览、趋势图、第一屏结论同一份数据）
   const rows = useMemo(
@@ -127,7 +131,7 @@ export function AccountUsageShare({
                       </div>
                       <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
                         <div
-                          className="h-full rounded-full bg-emerald-500/75"
+                          className={cn("h-full rounded-full", tones.normal)}
                           style={{ width: `${Math.min(100, Math.max(0, ratio * 100))}%` }}
                         />
                       </div>

@@ -16,4 +16,5 @@ export * from "./settings-sync";
 export * from "./settings-bundle";
 export * from "./clients";
 export * from "./diagnostics";
+export * from "./credential";
 export * from "./failure";

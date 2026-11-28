@@ -563,10 +563,14 @@ fn speaker_label(record: &Value) -> &'static str {
 
 /// 详情里「最近 N 条可读内容」的每条文本上限（字符数）。
 ///
-/// 与列表摘要不同：详情是用户主动展开全文的入口，保留更长的上下文（原来的 240 字），
+/// 与列表摘要不同：详情是用户主动展开全文的入口，保留更长的上下文（原来的 240 字 → 480），
 /// 但**必须**和摘要走同一套注入块清理（[`excerpt_body`]）——否则卡片上是一句人话，
 /// 展开后却是 `<system-reminder>...` 原文，用户会以为工具坏了。
-const PREVIEW_CHARS: usize = 240;
+///
+/// 240 → 480 的理由：模型回复里的 Markdown 表格（表头 + 分隔行 + 2~3 行数据）在 240 字内
+/// 必被切断，前端只能把半张表渲染成纯文本；详情是用户主动展开的入口，给到 480 才看得全
+/// 一张小表。列表摘要走的是另一套 [`EXCERPT_CHARS`]（120），不受这里影响，载荷不会变大。
+const PREVIEW_CHARS: usize = 480;
 
 pub(super) fn content_preview(content: &ContentState) -> Vec<Value> {
     let ContentState::Ready(snapshot) = content else {
@@ -1155,7 +1159,7 @@ fn trailing_closing_tag_start(text: &str, name: &str) -> Option<usize> {
 /// 列表卡片的单行摘要：正文里**最近一条用户消息**，没有用户消息时退到最近一条助手消息。
 ///
 /// 口径与 [`content_preview`] 完全一致（同一个 `record_text` / [`speaker_label`]），只是
-/// **只取 1 条、截到约 120 字**：列表一次要下发上百个组，把 6 条 × 240 字都放进去会让载荷
+/// **只取 1 条、截到约 120 字**：列表一次要下发上百个组，把 6 条 × 480 字都放进去会让载荷
 /// 无谓翻好几倍，而卡片只有两行可见。
 ///
 /// 逐条判定（记录级过滤，**文本手术到此为止**）：

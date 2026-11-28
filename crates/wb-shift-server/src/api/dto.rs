@@ -510,3 +510,32 @@ pub(crate) struct SaveTextFileRequest {
 pub(crate) struct ImportSettingsBundleRequest {
     pub(crate) bundle: Value,
 }
+
+/// `POST /api/session-writes/discard`。
+///
+/// 只传操作 id：档位由操作记录自身决定，宿主层不参与选择，避免「选错档位结束错记录」。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct SessionWriteDiscardRequest {
+    pub(crate) operation_id: String,
+}
+
+/// `POST /api/credential-config`（R6-06）。
+///
+/// 与 Tauri 命令参数同名（`config`）。**只**允许三个开关位进入边界：平台探测结论
+/// 由闸门自己写，不接受外部提交，因此这里连字段都不留。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveCredentialConfigRequest {
+    #[serde(default)]
+    pub(crate) config: CredentialSwitches,
+}
+
+/// 凭据开关位（全部可选：只提交改动的项，未提交的保持原值）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct CredentialSwitches {
+    pub(crate) decrypt_read_only: Option<bool>,
+    pub(crate) decrypt_write: Option<bool>,
+    pub(crate) first_prompt_shown: Option<bool>,
+}

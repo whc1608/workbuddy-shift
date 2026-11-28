@@ -81,6 +81,9 @@ pub(in crate::modules::session) fn run_copy(
         target_account_id: target.account_id.clone(),
         pending: &pending,
         ignore_aux: options.ignore_aux,
+        // R6-08：账本搬运开关原样下传（默认 false → 副本不带来源历史消耗）。
+        copy_usage: options.copy_usage,
+        copy_interruptions: options.copy_interruptions,
         // 整批评审用同一份会话行索引（见 `copy/same_content.rs`）。
         rows: SessionRowIndex::default(),
     };
@@ -266,6 +269,10 @@ pub(in crate::modules::session) struct CopyContext<'a> {
     pub(in crate::modules::session) pending: &'a [Operation],
     /// 用户显式忽略账本（用量 + 中断记录）：本次新建的操作记录带 `auxSkipped`。
     pub(in crate::modules::session) ignore_aux: bool,
+    /// R6-08：是否把来源账号的 `session_usage` 搬到副本（默认 `false` = 不搬）。
+    pub(in crate::modules::session) copy_usage: bool,
+    /// R6-08：是否搬中断记录（默认 `true`，随 `ignore_aux` 反向取值）。
+    pub(in crate::modules::session) copy_interruptions: bool,
     /// 会话行索引（懒加载）：复制前的内容级去重需要按账号查会话列表，
     /// 整批复制复用同一份结果，避免逐会话重复打开数据库与扫描 `projects/`。
     pub(in crate::modules::session) rows: SessionRowIndex,

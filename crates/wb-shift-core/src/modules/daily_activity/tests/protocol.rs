@@ -353,8 +353,10 @@ async fn jsonrpc_error_on_fatal_step_fails_without_waiting_for_poll_timeout() {
     let error = row["error"].as_str().unwrap_or_default();
     assert!(error.contains("initialize"), "{error}");
     assert!(error.contains("-32602"), "错误里要带 JSON-RPC code：{error}");
+    // 上界 5s：要排除的是「白等 30s 轮询超时」，不是精确耗时；并行跑全量时
+    // 进程 spawn 与调度会被其它用例挤占，1s 的硬上界会变成负载敏感断言。
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < Duration::from_secs(5),
         "必须快速失败（实测 {elapsed:?}）：JSON-RPC 错误不得白等轮询超时"
     );
     // 没有进入第 4 步：一次状态查询都不该发。

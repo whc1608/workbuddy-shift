@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Download, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -14,17 +14,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { diagnosticsFileName, previewPhase } from "@/lib/diagnostics-format";
 import { downloadTextFile } from "@/lib/export-download";
 import type { DiagnosticsReport } from "@/lib/types";
 import { SettingsGroup } from "./rows";
 
-/** 导出文件名：带生成时间，用户连导两次不会互相覆盖。 */
+/** 导出文件名：本地时间戳（与报告头部一致），用户连导两次不会互相覆盖。 */
 function fileNameFor(report: DiagnosticsReport): string {
-  const stamp = new Date(report.generatedAt)
-    .toISOString()
-    .replace(/[:T]/g, "-")
-    .slice(0, 16);
-  return `workbuddy-shift-diagnostics-${stamp}.txt`;
+  return diagnosticsFileName(report.generatedAt);
 }
 
 /** 体积提示：报告是纯文本，几百 KB 已经算很大（日志最多 200 行）。 */
@@ -36,16 +33,10 @@ function sizeLabel(bytes: number): string {
 /**
  * 诊断包：一键得到「能直接贴进 issue 的脱敏信息」。
  *
- * 用户来反馈时往往说不出关键事实（版本、宿主、哪个客户端没装、日志最后一条），
- * 作者要来回问三轮。这里把那一组事实交给后端一次装配并**自动脱敏**
- * （路径 / UUID / URL 路径 / 邮箱 / 令牌 / 用户名 / 长数字），前端只负责展示与搬运。
- *
- * 两个动作：
- * - **预览诊断包**：弹层显示将要导出的全文（可滚动），可一键复制；
- * - **导出诊断包**：桌面端走系统保存对话框（`.txt`，原子写入）；网页版走浏览器下载，
- *   服务端不往用户机器上写任何路径（对齐 `canPersistErrorLog()` 的既有约定）。
- *
- * 演示模式：两个按钮都包在 {@link DemoAction} 里（禁用 + 解释），不会「点了才报错」。
+ * R6-10 体验优化：
+ * - 卡片挂载后在空闲时**预热一次**（宿主侧还有 30s 探测缓存），点预览几乎即时；
+ * - 「预览」**立即打开弹层**并显示「生成中」，完成后填充，不再「点了等半天才弹」；
+ * - 「重新生成」传 `force=true` 跳过缓存。
  */
 export function DiagnosticsCard() {
   const [report, setReport] = useState<DiagnosticsReport | null>(null);
@@ -54,27 +45,58 @@ export function DiagnosticsCard() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
+  // 用 ref 防重复：预热与用户点击可能并发触发，不能各发一次。
+  const inflight = useRef(false);
 
-  /** 取一次报告（已有则复用，避免每次点都重扫盘）。 */
+  /** 取一次报告（已有则复用，force 时重新生成）。 */
   async function load(force = false): Promise<DiagnosticsReport | null> {
-    if (report && !force) return report;
+    if (inflight.current) return report;
+    if (!force && report) return report;
+    inflight.current = true;
     setLoading(true);
     setError("");
     try {
-      const next = await api.getDiagnosticsReport();
+      const next = await api.getDiagnosticsReport(force);
       setReport(next);
       return next;
     } catch (e) {
       setError(api.asError(e));
       return null;
     } finally {
+      inflight.current = false;
       setLoading(false);
     }
   }
 
-  async function openPreview() {
-    const loaded = await load();
-    if (loaded) setPreviewOpen(true);
+  // 挂载预热：空闲时拉一次，用户点预览前报告通常已就绪。
+  useEffect(() => {
+    let cancelled = false;
+    const run = () => {
+      if (!cancelled) void load(false);
+    };
+    const idle = typeof window !== "undefined" ? window.requestIdleCallback : undefined;
+    let handle: number;
+    if (typeof idle === "function") {
+      handle = idle(run, { timeout: 2000 });
+    } else {
+      handle = window.setTimeout(run, 300);
+    }
+    return () => {
+      cancelled = true;
+      if (typeof idle === "function" && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(handle);
+      } else {
+        window.clearTimeout(handle);
+      }
+    };
+    // 只在挂载时预热一次。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 立即打开弹层（先显示「生成中」），再在后台取报告。 */
+  function openPreview() {
+    setPreviewOpen(true);
+    void load(false);
   }
 
   /** 复制全文：剪贴板失败必须如实提示，不能静默当成成功。 */
@@ -93,7 +115,8 @@ export function DiagnosticsCard() {
   }
 
   async function exportReport() {
-    const loaded = await load();
+    // 预览正在生成时不要静默取消：能复用已有报告就复用，没有再等一次。
+    const loaded = report ?? (await load(false));
     if (!loaded) return;
     // 网页版：浏览器下载（不落服务端磁盘）。
     if (api.isWebui()) {
@@ -108,7 +131,8 @@ export function DiagnosticsCard() {
         filters: [{ name: "文本", extensions: ["txt"] }],
       });
       if (!target) return;
-      await api.exportDiagnostics(target);
+      // 导出复用宿主侧 30s 缓存探测（不强制重新探测）。
+      await api.exportDiagnostics(target, false);
       toast.success("诊断包已导出", { description: target });
     } catch (e) {
       toast.error("导出失败", { description: api.asError(e) });
@@ -118,6 +142,7 @@ export function DiagnosticsCard() {
   }
 
   const busy = loading || exporting;
+  const phase = previewPhase(previewOpen, loading, Boolean(report?.text));
 
   return (
     <SettingsGroup id="settings-diagnostics" title="诊断包">
@@ -128,7 +153,7 @@ export function DiagnosticsCard() {
         </div>
         <div className="flex flex-wrap gap-2 px-4 py-3 sm:px-5">
           <DemoAction>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => void openPreview()}>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => openPreview()}>
               {loading ? <Loader2 className="animate-spin" /> : null}
               预览诊断包
             </Button>
@@ -143,6 +168,7 @@ export function DiagnosticsCard() {
         {report && (
           <div className="border-t border-border/50 px-4 py-2 text-[11px] leading-5 text-muted-foreground sm:px-5">
             上次生成：{new Date(report.generatedAt).toLocaleString()} · {sizeLabel(report.bytes)}
+            {typeof report.elapsedMs === "number" ? ` · 耗时 ${report.elapsedMs}ms` : ""}
           </div>
         )}
         {error && (
@@ -160,15 +186,28 @@ export function DiagnosticsCard() {
               以下文本就是将要导出的全部内容（已脱敏）。可滚动查看，确认后再复制或导出。
             </DialogDescription>
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto rounded-lg border border-border/60 bg-foreground/[0.04] p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all">
-            {report?.text ?? ""}
-          </pre>
+          {phase === "loading" || phase === "empty" ? (
+            <div className="flex min-h-[160px] items-center justify-center rounded-lg border border-border/60 bg-foreground/[0.04] p-3 text-[11px] text-muted-foreground">
+              {phase === "loading" ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  生成中…
+                </span>
+              ) : (
+                <span>{error || "暂时没有可预览的内容，请点「重新生成」。"}</span>
+              )}
+            </div>
+          ) : (
+            <pre className="max-h-[60vh] overflow-auto rounded-lg border border-border/60 bg-foreground/[0.04] p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all">
+              {report?.text ?? ""}
+            </pre>
+          )}
           <DialogFooter className="sm:justify-between">
             <Button variant="outline" size="sm" onClick={() => void load(true)} disabled={loading}>
               {loading ? <Loader2 className="animate-spin" /> : null}
               重新生成
             </Button>
-            <Button size="sm" onClick={() => void copyAll()}>
+            <Button size="sm" onClick={() => void copyAll()} disabled={!report}>
               {copied ? <Check /> : <Copy />}
               {copied ? "已复制全文" : "复制全文"}
             </Button>

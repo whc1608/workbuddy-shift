@@ -62,6 +62,12 @@ pub(super) fn windows_fallback_exe_candidates(
         for dir in variant.windows_image_names() {
             push_win_dir(&[&root, "Program Files", dir]);
         }
+        // 便携版 / 自定义安装目录：常见做法是直接放在盘根（如 `D:\WorkBuddy\WorkBuddy.exe`），
+        // 既不在 Program Files 也不在 LOCALAPPDATA。不覆盖这类布局时，按进程路径取不到
+        // （例如客户端以管理员身份运行、当前进程读不到它的 Path）就彻底找不到 exe。
+        for dir in variant.windows_image_names() {
+            push_win_dir(&[&root, dir]);
+        }
     }
     out
 }

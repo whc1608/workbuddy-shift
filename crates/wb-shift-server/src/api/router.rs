@@ -107,6 +107,14 @@ pub fn router(state: SharedState) -> Router {
             "/api/session-links/preview-cross",
             post(api_session_links_preview_cross),
         )
+        .route(
+            "/api/session-writes/pending",
+            get(api_pending_session_writes),
+        )
+        .route(
+            "/api/session-writes/discard",
+            post(api_discard_session_write),
+        )
         .route("/api/session-sync/cross", post(api_session_sync_cross))
         .route("/api/session-groups/list", post(api_list_session_groups))
         .route("/api/session-groups/detail", post(api_get_session_group))
@@ -235,6 +243,11 @@ pub fn router(state: SharedState) -> Router {
         // 排障：脱敏诊断包全文（只读）。网页版只在响应里给文本，由前端复制，
         // 没有落盘路由——服务端不写用户机器上的任意路径。
         .route("/api/diagnostics", get(api_diagnostics_report))
+        // R6-06：只读写「按需解密」的三个开关位；不触发解密、不返回 token。
+        .route(
+            "/api/credential-config",
+            get(api_credential_config).post(api_save_credential_config),
+        )
         .route("/api/update/check", get(api_update_check))
         .route(
             "/api/update/config",

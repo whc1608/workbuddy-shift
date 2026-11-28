@@ -127,6 +127,14 @@ pub fn travel_config_file() -> PathBuf {
     store_dir().join("auto_travel_config.json")
 }
 
+/// 凭据（R6-06 按需解密）设置：只读 / 写开关、首次说明、平台探测结论。
+///
+/// 独立文件而不塞进签到配置：这份配置描述「本机客户端能不能解密」，
+/// 与自动化调度无关，也不进设置包导出（换机后必须重新探测）。
+pub fn credential_config_file() -> PathBuf {
+    store_dir().join("credential.json")
+}
+
 pub fn travel_cache_file() -> PathBuf {
     store_dir().join("travel_cache.json")
 }

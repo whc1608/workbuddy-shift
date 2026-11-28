@@ -247,6 +247,10 @@ pub async fn oauth_poll(login_id: &str) -> Value {
         "domain": domain.to_string(),
         // 档位随登录来源写入：后续切换/刷新/积分/签到都以它为准。
         "variant": variant.as_str(),
+        // 凭据来源（R6-01）：扫码所得是**独立会话**，live 出现加密信封时仍可照常刷新。
+        // 三个写入点之一（另两处见 `auth_file::imported_account_from_root` 与导入合并）。
+        // 键名必须与 `account::CREDENTIAL_SOURCE_FIELD` 逐字一致（`json!` 只接受字面量键）。
+        "credentialSource": account::CredentialSource::Oauth.as_str(),
         "expiresAt": expires_at,
         "refreshExpiresAt": refresh_expires_at,
         "auth_raw": data,

@@ -157,6 +157,9 @@
             // issue #184「最近切换」：官方资料里没有这两个键，必须整对保留。
             "lastUsedAt" => json!(1_763_654_321_000_i64),
             "lastUsedClient" => json!("vscode"),
+            // R6-01：凭据来源只由三个写入点（扫码 / 本机采集 / 导入）写，刷新的 `updated`
+            // 对象天然不带它；不继承就会被清空、账号退回「判不出」。
+            "credentialSource" => json!("oauth"),
             other => panic!(
                 "LOCAL_ACCOUNT_FIELDS 新增了 `{other}`，请在本不变量测试里补一条样例值，\
                  并确认三处写回路径都会保留它"

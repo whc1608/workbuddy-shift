@@ -33,7 +33,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::modules::account::{
-    account_display_name, build_auth_headers, envelope_token_error, load_accounts, variant_of,
+    account_display_name, build_auth_headers, load_accounts, variant_of,
 };
 use crate::modules::config::{
     add_checkin_log, http_request, is_route_missing, load_checkin_config, load_checkin_logs,

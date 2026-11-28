@@ -1,4 +1,6 @@
 //! 复制执行与恢复重放：逐会话写入、操作日志推进、关联组与基线提交。
+use crate::modules::usage_origin;
+
 use super::plan::{CopyContext, CopyOutcome};
 use super::*;
 /// 复制单个会话：预分配 UUID → 持久化操作 → 正文 → 数据库 → 映射 → 关联/基线。
@@ -145,6 +147,8 @@ pub(in crate::modules::session) fn copy_one_session(
         &mut operation,
         &snapshot,
         &source_path,
+        context.copy_usage,
+        context.copy_interruptions,
     ) {
         Ok(notes) => notes,
         Err(error) => {
@@ -178,7 +182,11 @@ pub(in crate::modules::session) fn copy_one_session(
 /// 源行读取与目标行写入的档位经 `source_paths` 分离（跨档复制时与 `paths` 不同，
 /// 同档时相同）；正文只从 `source_path` 读、只往目标档写。
 ///
-/// 返回值是两条诊断说明：账本（目标客户端不支持）与空间（同目录多分组）。
+/// 返回值是两条诊断说明：账本（目标客户端不支持 / R6-08 未搬历史消耗）与空间（同目录多分组）。
+///
+/// 参数已到 8 个（两侧档位、操作、快照、源路径、两个 R6-08 开关）：都是「一次复制」的
+/// 显式输入，打包成结构体只会把「哪个是源、哪个是目标」藏起来。影响面仅限本 crate。
+#[allow(clippy::too_many_arguments)]
 pub(in crate::modules::session) fn finish_copy_from_body(
     paths: &SessionPaths,
     variant: WbVariant,
@@ -186,6 +194,8 @@ pub(in crate::modules::session) fn finish_copy_from_body(
     operation: &mut Operation,
     snapshot: &ContentSnapshot,
     source_path: &Path,
+    copy_usage: bool,
+    copy_interruptions: bool,
 ) -> Result<(Option<&'static str>, Option<&'static str>), String> {
     // 复制可能归一最后一条 assistant 消息的 `incomplete`，所以「本次写入的正文摘要」
     // 不一定等于源快照摘要：
@@ -221,6 +231,8 @@ pub(in crate::modules::session) fn finish_copy_from_body(
         &operation.source.uid,
         &operation.target.uid,
         operation.aux_skipped,
+        copy_usage,
+        copy_interruptions,
         body_latest_at,
     )? {
         DbCopyOutcome::Inserted {
@@ -245,7 +257,40 @@ pub(in crate::modules::session) fn finish_copy_from_body(
     operation.group_id = group_id;
     advance_operation(paths, operation, OpPhase::LinksCommitted)?;
     advance_operation(paths, operation, OpPhase::Completed)?;
+    // R6-07 写入点 1/4：WorkBuddy **复制**的归属交接（两个公开入口
+    // `copy_sessions_for_switch*` / `copy_sessions_cross*` 最终都走到这里，只埋一次）。
+    //
+    // 位置必须在 `Completed` 之后：`recover_pending_session_operations` 会重放
+    // `finish_copy_from_body`，而阶段只前进不回退——到达 `Completed` 后本条操作不会再
+    // 进入业务写入，因此这段只执行一次（`session/recovery.rs` 的补完路径另有同语义埋点，
+    // 两者互斥：恢复只处理 `phase < Completed` 的操作）。
+    //
+    // boundary 取「本次写入正文的最新记录时间戳」与 `now_ms()` 的较大值：来源正文里
+    // 出现未来时间戳（时钟回拨/伪造）时也要把这段历史整体划给来源。
+    let boundary_ms = body_latest_at.map_or_else(now_ms, |latest| latest.max(now_ms()));
+    record_copy_origin_quiet(paths, variant, operation, boundary_ms);
     Ok((aux_note, space_note))
+}
+
+/// R6-07：把「目标继承来源」写进归属索引。**失败只记日志，绝不影响复制结果。**
+///
+/// 抽出函数而不是就地写，是为了让上面的阶段推进保持可读，并让恢复路径复用同一段判定
+/// （命名空间映射唯一来源 [`usage_origin::namespace_for_variant`]）。
+pub(in crate::modules::session) fn record_copy_origin_quiet(
+    paths: &SessionPaths,
+    variant: WbVariant,
+    operation: &Operation,
+    boundary_ms: i64,
+) {
+    usage_origin::record_copy_quiet(
+        &paths.store_root,
+        usage_origin::namespace_for_variant(variant),
+        &operation.target.session_id,
+        usage_origin::namespace_for_variant(operation.source_variant.unwrap_or(variant)),
+        &operation.source.session_id,
+        boundary_ms,
+        &operation.source.uid,
+    );
 }
 
 /// 推进操作阶段。阶段只能前进：已经走到更靠后的阶段时不回写（恢复路径不得把

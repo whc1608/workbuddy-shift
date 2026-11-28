@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use crate::modules::account::{
-    account_display_name, build_auth_headers, enterprise_id_of, envelope_token_error,
-    is_enterprise_account, variant_of,
+    account_display_name, build_auth_headers, enterprise_id_of, is_enterprise_account, variant_of,
 };
+use crate::modules::at_rest;
 use crate::modules::config::{
     http_request, is_route_missing, load_checkin_config, now_ms, CHECKIN_API_PREFIX,
     WORKBUDDY_API_ENDPOINT,
@@ -20,18 +20,31 @@ use crate::modules::credit_usage;
 use crate::modules::refresh::{ensure_fresh_token, refresh_account_token};
 use crate::modules::variant::WbVariant;
 
-/// 查询单账号的积分资源及到期时间。
+/// 查询单账号的积分资源及到期时间（只读用途，受只读解密开关控制）。
 pub async fn get_credit_expiry(account: &Value) -> Value {
-    // 加密信封凭据短路：明文解不出来，任何请求都只会发出空 Bearer 并换回网关 401。
-    // 本入口同时覆盖新三路接口与旧接口回退两条取数链路，不再空跑请求。
-    if let Some(error) = envelope_token_error(account) {
-        return json!({
-            "ok": false,
-            "accountId": account.get("id").cloned().unwrap_or(Value::Null),
-            "accountName": account_display_name(account),
-            "error": error,
-        });
-    }
+    get_credit_expiry_for(account, at_rest::AccessMode::ReadOnly).await
+}
+
+/// 查询单账号的积分资源及到期时间，显式指定解密用途（写侧调用点用）。
+///
+/// **顺序不能反**：先 `usable_account`（信封 + 开关打开 → 解出临时副本），再判信封。
+/// 反过来写会让 R6-06 静默失效 —— 功能「看起来上线了」，解密分支却永远走不到。
+pub async fn get_credit_expiry_for(account: &Value, mode: at_rest::AccessMode) -> Value {
+    // R6-06：**先解密、后判信封**。顺序由 `resolve_or_envelope_error` 一处保证，
+    // 调用点不许自己先判信封（写反会让解密分支永远走不到）。
+    // 临时副本必须活到函数结束：绑定声明在解析之后，让借用成立。
+    let resolved = match at_rest::resolve_or_envelope_error(account, mode) {
+        Ok(temp) => temp,
+        Err(error) => {
+            return json!({
+                "ok": false,
+                "accountId": account.get("id").cloned().unwrap_or(Value::Null),
+                "accountName": account_display_name(account),
+                "error": error,
+            })
+        }
+    };
+    let account = resolved.as_ref().unwrap_or(account);
 
     let now = now_ms();
 

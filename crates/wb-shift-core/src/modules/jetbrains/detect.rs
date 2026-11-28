@@ -780,7 +780,7 @@ pub fn detect_current_account() -> Result<Value, String> {
             "matched": false,
             "configDir": config_dir,
             "uid": uid,
-            "message": "本机 JetBrains IDE 已登录 CodeBuddy 插件，但账号库中无匹配账号；可先用「从本机导入」或扫码登录同步账号后再切换。",
+            "message": "本机 JetBrains IDE 已登录 CodeBuddy 插件，但账号库中无匹配账号；请用该账号重新 OAuth 扫码登录后再切换。",
         }),
         SecretScan::NotFound => json!({
             "ok": true,

@@ -3,6 +3,7 @@ use super::paths::auto_rotate_logs_file;
 use super::paths::backup_dir;
 use super::paths::checkin_config_file;
 use super::paths::checkin_logs_file;
+use super::paths::credential_config_file;
 use super::paths::rate_limit_config_file;
 use super::paths::store_dir;
 use super::paths::travel_cache_file;
@@ -44,6 +45,7 @@ pub(crate) fn with_defaults(mut cfg: Value, defaults: Value) -> Value {
 mod automation;
 mod bundle;
 mod checkin;
+mod credential;
 mod travel;
 
 pub use automation::{
@@ -54,6 +56,13 @@ pub use automation::{
     set_rate_limit_hook_opt_out_at, try_consume_rotate_notify, ROTATE_LOG_MAX_RECORDS,
     ROTATE_NOTIFY_DAILY_LIMIT,
 };
+pub use credential::{
+    decrypt_read_enabled, decrypt_write_enabled, default_credential_config, load_credential_config,
+    load_credential_config_with_defaults, platform_probe, save_credential_config,
+    save_credential_switches, set_platform_probe, ProbeState, CREDENTIAL_SWITCH_KEYS,
+};
+// 可注入 store 根的读写：`at_rest` 的平台探测写 `platformProbe` 时用，单测也用它隔离
+// `credential.json`。路径只在 `credential` 里定义一次。
 pub use bundle::{
     export_settings_bundle, import_settings_bundle, SETTINGS_BUNDLE_KEYS, SETTINGS_BUNDLE_VERSION,
 };
@@ -61,6 +70,7 @@ pub use checkin::{
     add_checkin_log, compact_checkin_logs, default_checkin_config, load_checkin_config,
     load_checkin_config_with_defaults, load_checkin_logs, parse_clock, save_checkin_config,
 };
+pub(crate) use credential::{load_credential_config_at, save_credential_config_at};
 pub use travel::{
     default_travel_config, load_travel_cache, load_travel_config, load_travel_config_with_defaults,
     save_travel_cache, save_travel_config,

@@ -88,6 +88,13 @@ pub async fn checkin_account(account: &Value) -> Value {
         return json!({"result": "skipped", "reason": "unsupported_variant"});
     }
     let cfg = load_checkin_config();
+    // R6-06：**必须在 ensure_fresh_token 之前**解析，否则信封账号会先被 R6-01 的
+    // SkipEncrypted 挡一次（日志里出现无意义的 skipped_encrypted）才走到解密分支。
+    let resolved = crate::modules::at_rest::usable_account(
+        account,
+        crate::modules::at_rest::AccessMode::Write,
+    );
+    let account = resolved.as_ref().unwrap_or(account);
     let acc = ensure_fresh_token(account.clone(), &cfg).await;
     let variant = variant_of(&acc).as_str();
     let status = get_checkin_status(&acc).await;

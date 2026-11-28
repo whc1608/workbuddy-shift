@@ -22,6 +22,7 @@ export type StatusChipKey =
   | "creditPriority"
   | "checkinDone"
   | "travel"
+  | "credential"
   | "lastUsed"
   | "enterprise"
   | "multiTool";
@@ -51,14 +52,19 @@ export const STATUS_PRIORITY: Record<StatusChipKey, number> = {
   /** 旅行状态，纯信息。 */
   travel: 8,
   /**
+   * 凭据形态（R6-02）：「凭据已加密」只是形态说明，不阻断使用（信封账号照常能切换），
+   * 所以排在纯信息档、比「最近切换」更靠前——它解释的是「为什么没有『需重新登录』」。
+   */
+  credential: 9,
+  /**
    * 「最近切换」（issue #184）：纯信息，但比身份属性更贴近「我刚做了什么」，
    * 所以排在 `enterprise` 之前——紧凑卡只剩一个空槽时优先留下它。
    */
-  lastUsed: 9,
+  lastUsed: 10,
   /** 身份属性。 */
-  enterprise: 10,
+  enterprise: 11,
   /** 多端在用汇总。 */
-  multiTool: 11,
+  multiTool: 12,
 };
 
 /** 紧凑卡固定 3 个状态槽（含标记）。 */

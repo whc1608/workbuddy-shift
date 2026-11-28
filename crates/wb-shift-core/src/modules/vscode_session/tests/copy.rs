@@ -182,6 +182,50 @@
     /// `index.json.corrupted.<ms>` 并重建，同时多出一条垃圾空会话（见 acceptance.md §3）。
     /// 目标原本 `current` 仍有效则保留的场景由
     /// `copy_conversation_remaps_ids_and_merges_index` 覆盖。
+    /// R6-07 写入点 3/4：IDE（三客户端共用的 `copy_sessions_in_with`）复制成功后必须写
+    /// 归属交接，索引落在**工具存储根**（由备份根 `<store>/backups/<kind>/<iso>` 反推）。
+    #[test]
+    fn copy_records_usage_origin_under_the_backup_store_root() {
+        let fixture = Fixture::new("origin-index");
+        seed_source(&fixture);
+        // 生产侧备份根就是 `<工具存储根>/backups/<backup_kind>/<utc_iso>`。
+        let store = fixture
+            .root
+            .parent()
+            .expect("fixture base")
+            .join(".workbuddy-shift");
+        let backup = store
+            .join("backups")
+            .join(VSCODE_STORE.backup_kind)
+            .join("2026-11-28T10-00-00Z");
+        std::fs::create_dir_all(&backup).unwrap();
+
+        let items = vec![CopyItem {
+            workspace_hash: WS.to_string(),
+            conversation_id: CONV_OLD.to_string(),
+            project_key: None,
+        }];
+        let report =
+            copy_sessions_in(&fixture.root, &backup, SRC_UID, DST_UID, &items).expect("copy ok");
+        let new_conv = report["copied"]
+            .as_array()
+            .expect("copied")
+            .first()
+            .and_then(|item| item["newId"].as_str())
+            .expect("newId")
+            .to_string();
+        assert_ne!(new_conv, CONV_OLD, "VS Code 路径恒取新会话 id");
+
+        let index = crate::modules::usage_origin::OriginIndex::load_at(&store);
+        let entry = index
+            .entry(crate::modules::usage_origin::NS_IDE_VSCODE, &new_conv)
+            .expect("IDE 复制必须写归属交接");
+        assert_eq!(entry.segments.len(), 1);
+        assert_eq!(entry.segments[0].uid, SRC_UID, "历史必须归来源账号");
+        assert!(!entry.heuristic, "显式写入不是启发式");
+        assert!(!entry.truncated);
+    }
+
     #[test]
     fn copy_into_empty_workspace_writes_current() {
         let fixture = Fixture::new("empty-target-ws");

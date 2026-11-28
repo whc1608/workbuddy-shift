@@ -80,6 +80,8 @@ fn copied_jsonl_replay_is_attributed_to_the_first_file_account() {
             ("session-original", "uid-original"),
             ("session-copy", "uid-copy"),
         ]),
+        &mut Attribution::empty(),
+        Some(namespace_for_variant(WbVariant::Cn)),
     );
 
     // 重放的两条只算一次，归原账号；副本只多算它新增的那条。
@@ -120,6 +122,8 @@ fn unmapped_session_lands_in_the_unassigned_bucket() {
         None,
         false,
         &HashMap::new(),
+        &mut Attribution::empty(),
+        Some(namespace_for_variant(WbVariant::Cn)),
     );
 
     let accounts = result["accounts"].as_array().expect("accounts");
@@ -160,6 +164,8 @@ fn global_summary_equals_the_sum_of_accounts() {
         None,
         false,
         &uid_map(&[("session-one", "uid-a"), ("session-two", "uid-a")]),
+        &mut Attribution::empty(),
+        Some(namespace_for_variant(WbVariant::Cn)),
     );
 
     let accounts = result["accounts"].as_array().expect("accounts");
@@ -211,7 +217,15 @@ fn global_summary_equals_the_sum_of_accounts() {
 /// 没有任何数据源 / 空账号列表时返回空数组，不 panic。
 #[test]
 fn empty_sources_return_empty_accounts() {
-    let value = source_from_roots(&[], "workbuddy", None, false, &HashMap::new());
+    let value = source_from_roots(
+        &[],
+        "workbuddy",
+        None,
+        false,
+        &HashMap::new(),
+        &mut Attribution::empty(),
+        Some(namespace_for_variant(WbVariant::Cn)),
+    );
     assert_eq!(value["accounts"].as_array().map(Vec::len), Some(0));
     assert_eq!(value["summary"]["records"], 0);
 }

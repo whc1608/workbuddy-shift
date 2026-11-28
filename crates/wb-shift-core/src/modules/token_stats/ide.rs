@@ -262,21 +262,27 @@ pub(super) struct IdeRequestContext<'a> {
     pub(super) cutoff: Option<i64>,
     pub(super) model_name: &'a str,
     pub(super) project: &'a str,
+    /// 会话 id：归属索引键的一部分（`ide:vscode:<sessionId>` 等）。
+    pub(super) session_id: &'a str,
+    /// 归属查询：`(索引, 命名空间)`；`None` 表示该来源不做归属覆盖（回退文件 uid）。
+    pub(super) origin: Option<(&'a OriginIndex, &'static str)>,
+    /// 这一份副本文件自身所属账号（记录命中归属段时会被覆盖）。
+    pub(super) file_uid: &'a str,
 }
 
 /// 把一个会话（`requests` 是它的某一份副本）里可计入的请求并入统计。
 ///
-/// `seen` 按请求指纹去重、跨副本共享：副本重放父历史时带的是原始时间戳，所以并集
-/// 既不会把历史日期重复抬高，也不会丢掉各副本复制后各自追加的请求。指纹缺失的记录
-/// 一律计入。
+/// `seen` 按请求指纹去重、跨副本共享（R6-07 起升级为**三个 IDE 来源共用一份**）：副本
+/// 重放父历史时带的是原始时间戳，所以并集既不会把历史日期重复抬高，也不会丢掉各副本
+/// 复制后各自追加的请求。指纹缺失的记录一律计入。
 ///
-/// 归属按**文件**走：`uid` 是这一份副本所在账号，`totals_by_uid` 按账号分别累加，
-/// 于是「重放历史归最早文件（原账号）、副本新增归副本账号」自然成立。
+/// 归属按**记录**走（R6-07）：先用 `(namespace, sessionId, ts)` 查归属段，命中即用段里的
+/// 账号；没有条目/记录晚于所有段/无时间戳 → 回退这一份副本所在账号（文件 uid）。于是
+/// 「重放的历史归来源账号、副本自己的新增归副本账号」不再依赖文件 mtime 顺序。
 pub(super) fn collect_ide_requests(
     collector: &mut SourceCollector,
     requests: &[Value],
     context: &IdeRequestContext<'_>,
-    uid: &str,
     seen: &mut HashSet<String>,
     totals_by_uid: &mut HashMap<String, Totals>,
 ) {
@@ -292,11 +298,15 @@ pub(super) fn collect_ide_requests(
             continue;
         };
         if let Some(fingerprint) = ide_request_fingerprint(request, &usage, ts) {
-            // 同一请求已在另一份副本里计过。
+            // 同一请求已在另一份副本 / 另一个 IDE 来源里计过。
             if !seen.insert(fingerprint) {
                 continue;
             }
         }
+        let attributed = context
+            .origin
+            .and_then(|(index, namespace)| index.attribute(namespace, context.session_id, ts));
+        let uid = attributed.as_deref().unwrap_or(context.file_uid);
         totals_by_uid.entry(uid.to_string()).or_default().add(usage);
         collector.add(usage, context.model_name, context.project, ts, uid);
     }
@@ -327,10 +337,19 @@ pub(super) fn ide_source(
     name: &str,
     cutoff: Option<i64>,
     project_by_session: &HashMap<String, String>,
+    attribution: &mut Attribution,
 ) -> Value {
     let mut paths = Vec::new();
     ide_index_files(&root, &mut paths);
-    ide_source_from_paths(root, name, paths, cutoff, project_by_session)
+    ide_source_from_paths(
+        root,
+        name,
+        paths,
+        cutoff,
+        project_by_session,
+        attribution,
+        None,
+    )
 }
 
 /// 按客户端目录收集后聚合：解析、去重与账号归因逻辑与全量版完全一致。
@@ -340,10 +359,21 @@ pub(super) fn ide_client_source(
     name: &str,
     cutoff: Option<i64>,
     project_by_session: &HashMap<String, String>,
+    attribution: &mut Attribution,
 ) -> Value {
     let mut paths = Vec::new();
     ide_client_index_files(&root, client, &mut paths);
-    ide_source_from_paths(root, name, paths, cutoff, project_by_session)
+    // 命名空间严格用写入侧同一份映射（`VSCode → ide:vscode` 等），未知客户端不覆盖。
+    let namespace = Attribution::ide_namespace(client);
+    ide_source_from_paths(
+        root,
+        name,
+        paths,
+        cutoff,
+        project_by_session,
+        attribution,
+        namespace,
+    )
 }
 
 fn ide_source_from_paths(
@@ -352,6 +382,8 @@ fn ide_source_from_paths(
     paths: Vec<PathBuf>,
     cutoff: Option<i64>,
     project_by_session: &HashMap<String, String>,
+    attribution: &mut Attribution,
+    namespace: Option<&'static str>,
 ) -> Value {
     // 复用 `Target`：mtime 只取一次，既用于「副本按落地顺序处理」，也用于窗口裁剪。
     let mut targets: Vec<Target> = paths
@@ -396,6 +428,24 @@ fn ide_source_from_paths(
 
     let mut collector = SourceCollector::default();
 
+    // 归属索引的只读视图 + 「三个 IDE 来源共用」的指纹集合 + 存活键：三者是 `Attribution`
+    // 的不同字段，拆开借用后互不干扰。
+    let Attribution {
+        origin,
+        alive_keys,
+        ide_seen,
+        ..
+    } = attribution;
+    // 存活键：这一轮在磁盘上见到的会话（与窗口无关，仅用于统计结束后的 GC）。
+    if let Some(namespace) = namespace {
+        for target in &targets {
+            let session_id = ide_session_id(&target.path);
+            if !session_id.is_empty() {
+                alive_keys.insert(key_of(namespace, &session_id));
+            }
+        }
+    }
+
     for (index, _) in targets.iter().enumerate() {
         let fingerprint = weights[index]
             .as_ref()
@@ -429,9 +479,11 @@ fn ide_source_from_paths(
             cutoff,
             model_name: &model_name,
             project: &project,
+            session_id: &lead_session_id,
+            origin: namespace.map(|namespace| (&*origin, namespace)),
+            file_uid: "",
         };
         let mut totals_by_uid: HashMap<String, Totals> = HashMap::new();
-        let mut seen: HashSet<String> = HashSet::new();
         for member in members {
             let Ok(text) = std::fs::read_to_string(&targets[*member].path) else {
                 collector.note_parse_error();
@@ -444,12 +496,19 @@ fn ide_source_from_paths(
             let Some(requests) = value.get("requests").and_then(Value::as_array) else {
                 continue;
             };
+            // 每一份副本都带自己的**会话 id**（副本会被重随机 id）与自己的账号目录：
+            // 归属段按成员自己的 id 查，记录时间戳决定它是「继承来的历史」还是「自己新增的」。
+            let member_session_id = ide_session_id(&targets[*member].path);
+            let context = IdeRequestContext {
+                session_id: &member_session_id,
+                file_uid: &uids[*member],
+                ..context
+            };
             collect_ide_requests(
                 &mut collector,
                 requests,
                 &context,
-                &uids[*member],
-                &mut seen,
+                ide_seen,
                 &mut totals_by_uid,
             );
         }

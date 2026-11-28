@@ -1,5 +1,7 @@
 //! 同步写入计划：逐项重新校验凭据与内容版本，输出可执行计划或跳过 / 拒绝原因。
 use super::*;
+// 侧别与原因的措辞只有一份实现（`session_link::sync_decision`），VS Code 入口共用。
+use crate::modules::session_link::unverifiable_sides;
 
 /// 校验通过后的执行计划：写入阶段与报告所需的全部已核对信息。
 ///
@@ -259,53 +261,6 @@ pub(in crate::modules::session) fn plan_sync_selection(
             target_status_before,
             reason: decision.reason,
         }),
-    }
-}
-
-/// 两侧内容状态的可读说明，供「内容不可验证」的文案说明**是哪一侧**、**为什么**。
-///
-/// 只写确实不可验证的那一侧：两侧都不 Ready 时两侧都写，只有一侧不 Ready 时只写那一侧，
-/// 免得把「另一侧没问题」也写进拒绝理由里误导用户。两侧都 Ready 时返回 `None`——
-/// 「只是内容变多变少」没有「哪一侧坏了」可讲，调用方据此不追加任何内容状态说明。
-pub(in crate::modules::session) fn unverifiable_sides(
-    source: &ContentState,
-    target: &ContentState,
-) -> Option<String> {
-    let mut parts: Vec<String> = Vec::with_capacity(2);
-    if !matches!(source, ContentState::Ready(_)) {
-        parts.push(format!(
-            "来源：{}",
-            side_content_reason(SOURCE_ACCOUNT_LABEL, source)
-        ));
-    }
-    if !matches!(target, ContentState::Ready(_)) {
-        parts.push(format!(
-            "目标：{}",
-            side_content_reason(TARGET_ACCOUNT_LABEL, target)
-        ));
-    }
-    (!parts.is_empty()).then(|| parts.join("；"))
-}
-
-/// 侧别称谓：与 `decide_sync` 的判定原因逐字同口径，不新造术语。
-///
-/// 用户先在预览里看到「当前账号的内容无法确认：第 N 行的格式无法识别…」，执行时再看到
-/// 同一句话，才能确认「点同步之前就坏了，不是我点错了」。
-pub(in crate::modules::session) const SOURCE_ACCOUNT_LABEL: &str = "当前账号";
-pub(in crate::modules::session) const TARGET_ACCOUNT_LABEL: &str = "目标账号";
-
-/// 单侧内容状态的说明；`account` 只取 [`SOURCE_ACCOUNT_LABEL`] / [`TARGET_ACCOUNT_LABEL`]。
-///
-/// 三个分支的措辞与 `decide_sync` 的 `Unknown` 文案一一对应（缺失 / 不可验证），
-/// 这样两处提示不会各说一套。
-pub(in crate::modules::session) fn side_content_reason(
-    account: &str,
-    state: &ContentState,
-) -> String {
-    match state {
-        ContentState::Ready(_) => format!("{account}的内容可验证"),
-        ContentState::Missing => format!("{account}的内容不存在，无法确认"),
-        ContentState::Unavailable(reason) => format!("{account}的内容无法确认：{reason}"),
     }
 }
 

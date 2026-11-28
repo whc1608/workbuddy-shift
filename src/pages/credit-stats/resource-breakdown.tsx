@@ -1,12 +1,25 @@
 import { CircleAlert, Loader2 } from "lucide-react";
 import { creditResourceName } from "@/lib/credit-package-names";
+import { useCreditBarTones } from "@/lib/credit-bar-palette";
 import { formatAmount, formatFullDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
   CreditExpiry,
 } from "@/lib/types";
 
+/**
+ * 积分明细：每个资源包两行（名称 + 到期 / 已用 / 剩余 / 总量，下面一条通栏细进度条）。
+ *
+ * 这是本 fork 的自定义布局（上游 0.5.x 是六列表格并额外按获取时间过滤）：
+ * - 不做按获取时间筛选，始终展示全部「剩余 > 0」的资源包，避免明细合计与标题剩余口径不一致；
+ * - 未使用（`used <= 0`）也画满条，用正常可用色而不是灰色，才不会被误读成「已用完」。
+ *
+ * 配色仍跟随上游的统一来源 `useCreditBarTones()`（设置 → 外观 → 积分条状态色），
+ * 不在这里写死颜色。
+ */
 export function ResourceBreakdown({ credit, loading }: { credit?: CreditExpiry; loading?: boolean }) {
+  // hook 必须在任何提前 return 之前取：设置页改动后明细条同步换色。
+  const tones = useCreditBarTones();
   if (loading) {
     return (
       <div className="flex items-center gap-2 px-4 py-8 text-sm text-muted-foreground sm:px-5">
@@ -40,6 +53,7 @@ export function ResourceBreakdown({ credit, loading }: { credit?: CreditExpiry; 
     <div className="divide-y divide-border/60">
       {resources.map((resource, index) => {
         const ratio = resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
+        const tone = resource.expired ? tones.expired : resource.expiringSoon ? tones.expiringSoon : tones.normal;
         return (
           <div key={`${resource.packageCode || resource.packageName || "resource"}-${index}`} className="min-w-0 px-4 py-1.5 sm:px-5">
             <div className="flex min-w-0 items-center justify-between gap-2">
@@ -53,7 +67,7 @@ export function ResourceBreakdown({ credit, loading }: { credit?: CreditExpiry; 
               </div>
             </div>
             <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-              <div className={cn("h-full rounded-full", resource.expired ? "bg-red-600/60 dark:bg-red-400/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-emerald-500/75")} style={{ width: `${ratio}%` }} />
+              <div className={cn("h-full rounded-full", tone)} style={{ width: `${ratio}%` }} />
             </div>
           </div>
         );

@@ -1126,13 +1126,16 @@ fn insert_session_copy_duplicates_row_with_target_uid() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
     assert_eq!(
         outcome,
         DbCopyOutcome::Inserted {
-            aux_note: None,
+            // R6-08 起默认不搬历史消耗，因此带这条诊断（本用例只关心 space 映射）。
+            aux_note: Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
             space_note: None
         }
     );
@@ -1164,6 +1167,8 @@ fn insert_session_copy_reports_missing_source_and_db() {
             "uid-a",
             "uid-b",
             false,
+            false,
+            true,
             None,
         )
         .unwrap(),
@@ -1181,6 +1186,8 @@ fn insert_session_copy_reports_missing_source_and_db() {
             "uid-a",
             "uid-b",
             false,
+            false,
+            true,
             None,
         )
         .unwrap(),
@@ -1446,11 +1453,14 @@ fn insert_session_copy_normalizes_running_row_status() {
                 "uid-a",
                 "uid-b",
                 false,
+                false,
+                true,
                 None,
             )
             .unwrap(),
+            // R6-08 起默认不搬历史消耗，因此每次复制都会带这条诊断（只影响「共消耗」展示）。
             DbCopyOutcome::Inserted {
-                aux_note: None,
+                aux_note: Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
                 space_note: None
             }
         );
@@ -1537,11 +1547,14 @@ fn insert_session_copy_without_status_column_still_works() {
             "uid-a",
             "uid-b",
             false,
+            false,
+            true,
             None,
         )
         .unwrap(),
+        // R6-08 起默认不搬历史消耗，因此带这条诊断（与「目标库不支持账本」是两回事）。
         DbCopyOutcome::Inserted {
-            aux_note: None,
+            aux_note: Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
             space_note: None
         }
     );
@@ -1669,13 +1682,16 @@ fn copy_remaps_space_id_to_target_account_space() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
     assert_eq!(
         outcome,
         DbCopyOutcome::Inserted {
-            aux_note: None,
+            // R6-08 起默认不搬历史消耗，因此带这条诊断（本用例只关心 space 映射）。
+            aux_note: Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
             space_note: None
         }
     );
@@ -1726,13 +1742,16 @@ fn copy_creates_space_for_target_when_missing() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
     assert_eq!(
         outcome,
         DbCopyOutcome::Inserted {
-            aux_note: None,
+            // R6-08 起默认不搬历史消耗，因此带这条诊断（本用例只关心 space 映射）。
+            aux_note: Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
             space_note: None
         }
     );
@@ -1828,6 +1847,8 @@ fn copy_passes_source_space_pinned_to_new_space() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
@@ -1913,13 +1934,16 @@ fn copy_keeps_null_space_id_without_creating_space() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
     assert_eq!(
         outcome,
         DbCopyOutcome::Inserted {
-            aux_note: None,
+            // R6-08 起默认不搬历史消耗，因此带这条诊断（本用例只关心 space 映射）。
+            aux_note: Some(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
             space_note: None
         }
     );
@@ -1964,6 +1988,8 @@ fn copy_rejection_leaves_no_orphan_space() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap_err();
@@ -2016,6 +2042,8 @@ fn copy_insert_failure_rolls_back_new_space() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap_err();
@@ -2062,6 +2090,8 @@ fn copy_new_space_inherits_create_folder_path() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
@@ -2105,6 +2135,8 @@ fn copy_new_space_inherits_create_folder_path() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
@@ -2321,6 +2353,93 @@ fn clean_source_copy_has_no_source_repaired_field() {
 }
 
 // ---------------------------------------------------------------------------
+// R6-08：复制默认不搬 `session_usage`（「谁用的记在谁头上」）
+// ---------------------------------------------------------------------------
+
+/// 默认口径（`copy_usage = false`）：**绝不搬来源数值**——源账本逐字段不变，副本只有
+/// 零值占位行；中断记录与积分无关，默认仍照搬。
+#[test]
+fn copy_leaves_source_usage_untouched_and_writes_a_zero_row() {
+    let env = ready_env("aux-r6-08-default");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    write_ledger(
+        &db,
+        "sess-1",
+        12_345,
+        678,
+        r#"{"r1":1.25}"#,
+        &[("req-1", None, None)],
+    );
+    let source_usage_before = ledger_usage(&db, "sess-1");
+    let source_interruptions_before = ledger_interruptions(&db, "sess-1");
+
+    let report = copy(&env, "uid-b", &["sess-1"]);
+    assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
+    let new_id = env.first_copy_id(&report);
+
+    // 源账号的历史消耗必须原样留在源账号。
+    assert_eq!(
+        ledger_usage(&db, "sess-1"),
+        source_usage_before,
+        "源账本必须逐字段不变"
+    );
+    assert_eq!(
+        ledger_interruptions(&db, "sess-1"),
+        source_interruptions_before,
+        "源中断记录必须逐字段不变"
+    );
+
+    // 副本只有零值占位行（客户端要求「有行」时的兜底），不是来源数值。
+    let (used, size, credit) = ledger_usage(&db, &new_id).expect("默认口径必须留零值占位行");
+    assert_eq!((used, size), (0, 0));
+    assert_eq!(credit.as_deref(), Some("{}"));
+    assert_eq!(
+        report["copied"][0]["auxNote"],
+        json!(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
+        "必须让用户知道「共消耗」为什么是 0"
+    );
+    // 中断记录默认仍搬（与积分无关）。
+    assert_eq!(ledger_interruptions(&db, &new_id).len(), 1);
+}
+
+/// 零值占位行是「只增不改」：客户端已经给副本写下的真实用量绝不被覆盖。
+#[test]
+fn zero_usage_row_never_overwrites_client_written_values() {
+    let env = ready_env("aux-r6-08-zero-keep");
+    let db = env.paths.workbuddy_db();
+    create_ledger_tables(&db);
+    write_ledger(&db, "sess-1", 999, 9, r#"{"r1":7.5}"#, &[]);
+    // 目标库已存在同 session_id 的用量行（客户端在复制落库后自己写过的形态）。
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO session_usage (session_id, used, size, updated_at, credit_json) \
+         VALUES ('new-zero', 42, 4, 1, '{\"r9\":6.5}')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    insert_session_copy(
+        &env.paths(),
+        &env.paths(),
+        "new-zero",
+        "sess-1",
+        "uid-a",
+        "uid-b",
+        false,
+        false,
+        true,
+        None,
+    )
+    .unwrap();
+
+    let (used, size, credit) = ledger_usage(&db, "new-zero").expect("行仍在");
+    assert_eq!((used, size), (42, 4), "零值行不得覆盖客户端真实用量");
+    assert_eq!(credit.as_deref(), Some(r#"{"r9":6.5}"#));
+}
+
+// ---------------------------------------------------------------------------
 // R5-14：会话账本（session_usage + session_turn_interruptions）随副本搬运
 // ---------------------------------------------------------------------------
 
@@ -2397,8 +2516,8 @@ fn ledger_interruptions(db: &Path, sid: &str) -> Vec<(String, Option<String>, Op
     rows
 }
 
-/// 用量与中断记录原样搬到副本：`credit_json` 逐字节相等（含浮点尾数）、
-/// `used`/`size` 逐字段相等、中断记录的 `request_id` 集合完全一致。
+/// 用量与中断记录原样搬到副本（**仅在显式打开 `copy_usage` 时**）：`credit_json` 逐字节
+/// 相等（含浮点尾数）、`used`/`size` 逐字段相等、中断记录的 `request_id` 集合完全一致。
 #[test]
 fn copy_carries_usage_and_interruptions_verbatim() {
     let env = ready_env("aux-happy");
@@ -2418,7 +2537,7 @@ fn copy_carries_usage_and_interruptions_verbatim() {
         ],
     );
 
-    let report = copy(&env, "uid-b", &["sess-1"]);
+    let report = copy_with_usage(&env, "uid-b", &["sess-1"]);
     assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
     let new_id = env.first_copy_id(&report);
 
@@ -2473,11 +2592,15 @@ fn copy_without_usage_rows_is_not_a_failure() {
     let report = copy(&env, "uid-b", &["sess-1"]);
     assert_eq!(report["copied"].as_array().unwrap().len(), 1, "{report}");
     let new_id = env.first_copy_id(&report);
-    assert!(
-        ledger_usage(&db, &new_id).is_none(),
-        "没有源数据就不该造一行"
+    // R6-08：默认口径写**零值行**（客户端要求副本有行），绝不写来源数值。
+    let (used, size, credit) = ledger_usage(&db, &new_id).expect("默认口径必须留零值占位行");
+    assert_eq!((used, size), (0, 0));
+    assert_eq!(credit.as_deref(), Some("{}"));
+    assert_eq!(
+        report["copied"][0]["auxNote"],
+        json!(AUX_USAGE_LEFT_IN_SOURCE_NOTE),
+        "必须让用户知道「共消耗」为什么是 0"
     );
-    assert!(report["copied"][0].get("auxNote").is_none());
 }
 
 /// 源库连账本表都没有（旧客户端）：跳过，复制照旧成功。
@@ -2506,6 +2629,8 @@ fn copy_reports_aux_note_when_target_lacks_ledger_tables() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();
@@ -2546,6 +2671,9 @@ fn aux_write_failure_rolls_back_the_session_row() {
         "uid-a",
         "uid-b",
         false,
+        // 只有「连账本一起复制」时才会真的写来源数值，本用例要复现写入报错。
+        true,
+        true,
         None,
     )
     .unwrap_err();
@@ -2627,6 +2755,9 @@ fn aux_replay_is_idempotent() {
         "uid-a",
         "uid-b",
         false,
+        // 重放幂等只在「搬账本」时才有意义（默认口径根本不写来源数值）。
+        true,
+        true,
         None,
     )
     .unwrap();
@@ -2643,6 +2774,9 @@ fn aux_replay_is_idempotent() {
         "uid-a",
         "uid-b",
         false,
+        // 重放幂等只在「搬账本」时才有意义（默认口径根本不写来源数值）。
+        true,
+        true,
         None,
     )
     .unwrap();
@@ -3240,6 +3374,8 @@ fn copy_into_legacy_db_without_activity_column_still_works() {
         "uid-a",
         "uid-b",
         false,
+        false,
+        true,
         None,
     )
     .unwrap();

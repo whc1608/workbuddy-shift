@@ -10,6 +10,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
 import { toggleGroupSelection, toggleSessionSelection, toggleSetKey } from "@/lib/session-selection";
+import {
+  SESSION_USAGE_ATTRIBUTION,
+  SESSION_USAGE_ATTRIBUTION_DETAIL,
+  SESSION_USAGE_ATTRIBUTION_TOAST,
+} from "@/lib/session-usage-copy";
 import type {
   AccountMeta,
   Session,
@@ -315,7 +320,7 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
       const recovered = report.recovered?.length ?? 0;
       if (recovered > 0) toast.success(`已补完 ${recovered} 个会话的复制`);
       if (ignoreAux && copied + recovered > 0) {
-        toast.info("本次复制未带用量与中断记录", { description: "之后不会自动补上：目标账号里这些会话的「共消耗」仍会比源账号少。" });
+        toast.info("本次复制未带用量与中断记录", { description: SESSION_USAGE_ATTRIBUTION_TOAST });
       }
       // 账本写入失败是唯一带「显式忽略」出口的失败：不在报告层吞掉，摆在弹窗里让用户选。
       if (report.canIgnoreAux) setAuxBlocked({ count: report.auxFailed?.length ?? errors.length });
@@ -401,7 +406,7 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
         </div>
         {auxBlocked && <div role="alert" className="rounded-md border border-danger/40 bg-danger/5 p-2.5 text-xs">
           <p className="font-medium text-danger">有 {auxBlocked.count} 个会话的用量记录没能写入</p>
-          <p className="mt-1 text-muted-foreground">可以仍然复制，但副本不带用量与中断记录：目标账号里这些会话的「共消耗」会比源账号少，<span className="font-medium text-foreground">之后不会自动补上</span>。</p>
+          <p className="mt-1 text-muted-foreground">可以仍然复制，但副本不带用量与中断记录：{SESSION_USAGE_ATTRIBUTION}，<span className="font-medium text-foreground">之后不会自动补上</span>。</p>
           <Button variant="outline" size="sm" className="mt-2" onClick={() => void copyAndLinkWorkbuddy(true)} disabled={busy}>仍然复制（不带用量与中断记录）</Button>
         </div>}
         <div className="min-w-0 space-y-1.5"><p className="text-xs font-medium">目标账号</p>
@@ -429,6 +434,12 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
             </span>
           </label>
         </div>
+        {/* R6-08：用量归属是**静态说明**，不再给「连账本一起复制 / 不带用量」这类选项——
+            后端复制路径已默认不搬 `session_usage`，让用户选只会造出与后端不一致的预期。 */}
+        <div className="min-w-0 space-y-1.5">
+          <p className="text-xs font-medium">用量与消耗</p>
+          <SessionUsageAttributionNote />
+        </div>
       </div>
       <DialogFooter className="shrink-0 sm:justify-between">
         <div className="min-w-0 space-y-0.5">
@@ -442,4 +453,15 @@ export function AddLinkedSessionDialog({ client, variantScope, disabled, onDone,
       </DialogFooter>
     </DialogContent>
   </Dialog>;
+}
+
+/**
+ * 「共消耗」归属的静态说明（R6-08）：复制前就把口径说清，复制后用户看到副本的
+ * 「共消耗」是 0 或偏少时才不会以为丢了数据。
+ *
+ * 单独导出是为了让单测能直接渲染这段文案（弹窗关闭状态下 `DialogContent` 不挂载，
+ * 无法通过渲染整个弹窗来断言）。文案本体来自 `@/lib/session-usage-copy`。
+ */
+export function SessionUsageAttributionNote() {
+  return <p className="text-xs text-muted-foreground">{SESSION_USAGE_ATTRIBUTION_DETAIL}</p>;
 }

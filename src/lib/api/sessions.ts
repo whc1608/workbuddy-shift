@@ -1,4 +1,6 @@
 import type {
+  DiscardedSessionWrite,
+  PendingSessionWrite,
   Session,
   SessionCopyReport,
   SessionLinksPreview,
@@ -232,4 +234,24 @@ export function pruneSessionGroups(args: {
 }): Promise<SessionGroupPruneReport> {
   if (demoModeEnabled) return Promise.reject(new Error(DEMO_UNAVAILABLE_MESSAGE));
   return call("prune_session_groups", args as unknown as Record<string, unknown>);
+}
+
+/**
+ * 未完成的会话写入（只读）。
+ *
+ * 操作目录跨档共用：返回的每项自带 `variant`，不按当前档位过滤。
+ */
+export async function pendingSessionWrites(): Promise<PendingSessionWrite[]> {
+  const result = await call<{ items: PendingSessionWrite[] }>("session_pending_writes", {});
+  return result.items;
+}
+
+/**
+ * 结束一次未完成的同步写入。
+ *
+ * 只改操作记录：不碰正文、不碰目标会话行；后端会拒绝不该由用户放弃的现场
+ * （例如「正文本就是本次写入的内容，下次切号会自动补完」），错误文案直接展示。
+ */
+export function discardSessionWrite(operationId: string): Promise<DiscardedSessionWrite> {
+  return call("session_discard_write", { operationId });
 }

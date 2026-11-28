@@ -62,8 +62,8 @@ export const SETTINGS_SECTIONS: SettingsSectionSpec[] = [
     id: "settings-appearance",
     title: "外观",
     group: "general",
-    rows: ["主题", "显示关联会话菜单"],
-    keywords: ["外观", "主题", "深色", "浅色", "跟随系统", "导航", "theme"],
+    rows: ["主题", "积分条状态色", "显示关联会话菜单"],
+    keywords: ["外观", "主题", "深色", "浅色", "跟随系统", "导航", "theme", "积分", "进度条", "配色", "状态色", "颜色"],
     availability: "always",
   },
   {
@@ -205,6 +205,27 @@ export const SETTINGS_SECTIONS: SettingsSectionSpec[] = [
       "support",
     ],
     availability: "always",
+  },
+  {
+    // R6-06：只读 / 写解密的两个开关。只读关闭时写开关一并失效，所以放在「诊断包」
+    // 之前——它是「凭据还能不能用」的前置说明，而不是出问题后的排障入口。
+    id: "settings-credential",
+    title: "凭据",
+    group: "desktop",
+    rows: ["只读解密", "写操作解密", "平台探测状态"],
+    keywords: ["凭据", "解密", "加密", "信封", "只读", "签到", "积分", "credential", "decrypt"],
+    availability: "always",
+  },
+  {
+    // 中断的同步会挡住这条会话之后的同步；这里是唯一的「结束记录」入口。
+    // 与「诊断包」相邻：两者都属于「出问题之后怎么办」。
+    id: "settings-pending-writes",
+    title: "未完成的写入",
+    group: "desktop",
+    rows: ["查看与结束"],
+    keywords: ["未完成", "写入", "同步失败", "恢复", "中断", "卡住", "pending", "recovery"],
+    // 演示模式没有后端、也读不到真实操作记录：不渲染，免得只剩一条「读取失败」。
+    availability: "not-demo",
   },
   {
     id: "settings-updates",
