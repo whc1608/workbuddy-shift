@@ -158,8 +158,7 @@ pub(super) fn switch_ide_with_copy(
                 None => {
                     relaunch_if_closed(flavor, closed);
                     return Err(
-                        "未检测到 CodeBuddy IDE 当前登录账号，无法复制升级后的会话。"
-                            .to_string(),
+                        "未检测到 CodeBuddy IDE 当前登录账号，无法复制升级后的会话。".to_string(),
                     );
                 }
             };

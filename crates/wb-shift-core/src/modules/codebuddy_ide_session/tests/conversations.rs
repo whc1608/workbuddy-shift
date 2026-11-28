@@ -1,6 +1,5 @@
-//! 新版会话库（`~/.codebuddy/codebuddy.db`）的单测：临时库 + 临时正文目录。
+// 新版会话库（`~/.codebuddy/codebuddy.db`）的单测：临时库 + 临时正文目录。
 
-use super::*;
 use crate::modules::codebuddy_ide_session::conversations::{list_sessions_in, migrate_sessions_in};
 use rusqlite::Connection;
 use std::path::PathBuf;

@@ -241,8 +241,8 @@ pub(super) fn migrate_sessions(
     target_uid: &str,
     ids: &[String],
 ) -> Result<Value, String> {
-    let path =
-        db_path().ok_or_else(|| "未找到 CodeBuddy 会话库（~/.codebuddy/codebuddy.db）".to_string())?;
+    let path = db_path()
+        .ok_or_else(|| "未找到 CodeBuddy 会话库（~/.codebuddy/codebuddy.db）".to_string())?;
     let backup_root = backup_dir().join("codebuddy-ide-db").join(utc_iso());
     migrate_sessions_in(&path, &backup_root, source_uid, target_uid, ids)
 }
@@ -257,7 +257,8 @@ pub(super) fn migrate_sessions_in(
     if !is_safe_uid(source_uid) || !is_safe_uid(target_uid) {
         return Err("账号 uid 非法，无法迁移会话".to_string());
     }
-    let conn = Connection::open(path).map_err(|error| format!("打开 CodeBuddy 会话库失败：{error}"))?;
+    let conn =
+        Connection::open(path).map_err(|error| format!("打开 CodeBuddy 会话库失败：{error}"))?;
     conn.busy_timeout(BUSY_TIMEOUT)
         .map_err(|error| format!("设置会话库忙等超时失败：{error}"))?;
     if !has_conversations_table(&conn) {
@@ -272,7 +273,9 @@ pub(super) fn migrate_sessions_in(
     }
     // VACUUM INTO 会连同 WAL 里的内容生成一份一致快照，比直接复制文件可靠。
     conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()])
-        .map_err(|error| format!("备份 CodeBuddy 会话库失败：{error}（请退出 CodeBuddy CLI 后重试）"))?;
+        .map_err(|error| {
+            format!("备份 CodeBuddy 会话库失败：{error}（请退出 CodeBuddy CLI 后重试）")
+        })?;
 
     let mut copied: Vec<Value> = Vec::new();
     let mut skipped: Vec<Value> = Vec::new();
@@ -297,7 +300,9 @@ pub(super) fn migrate_sessions_in(
         }
         let changed = tx
             .execute(update_conversation, params![id, target_uid, source_uid])
-            .map_err(|error| format!("写入 CodeBuddy 会话库失败：{error}（请退出 CodeBuddy CLI / IDE 后重试）"))?;
+            .map_err(|error| {
+                format!("写入 CodeBuddy 会话库失败：{error}（请退出 CodeBuddy CLI / IDE 后重试）")
+            })?;
         if changed == 0 {
             let owner: Option<Option<String>> = tx
                 .query_row(
