@@ -241,7 +241,10 @@ impl TaskKillGuard {
 ///
 /// 注意 `/T` 与 `/F` 的顺序：Windows 不要求顺序，但保持「先 `/T` 后 `/F`」与既有代码一致，
 /// 便于对照历史日志。
-#[cfg(target_os = "windows")]
+///
+/// 不按平台 cfg 收窄：调用方只在 Windows 编译，但单测要在 Ubuntu / macOS 的 CI 也跑一遍，
+/// 否则这条「命中祖先必须去掉 /T」的回归只能靠 Windows 机器发现。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn taskkill_args(pid: u32, force: bool, hits_self: bool) -> Vec<String> {
     let pid = pid.to_string();
     let mut args = vec!["/PID".to_string(), pid];
