@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { CircleAlert, Download, FileSpreadsheet, ListTree, Loader2, RefreshCw } from "lucide-react";
+import { CircleAlert, Download, FileSpreadsheet, Info, ListTree, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -44,9 +44,17 @@ import {
 import { TokenAccountSelect } from "./account-select";
 import { Dashboard } from "./dashboard";
 import { buildTokenStatsCsv, buildTokenStatsXlsx, tokenStatsFileName, tokenStatsXlsxFileName } from "./export";
-import { SourceKey, isSourceKey, persistPreferredTokenSource, readPreferredTokenSource } from "./data";
+import { SourceKey, isSourceKey, persistPreferredTokenSource, readPreferredTokenSource, staleLogDays } from "./data";
 import { RequestDetailDialog } from "./request-detail";
 import { TokenStatsLoadingSkeleton } from "./skeleton";
+
+/**
+ * 「最后一条日志距今几天」达到这个值才提示。
+ *
+ * 1 天不提示：早上打开时「昨天有日志」是正常状态，天天提示等于噪音；
+ * 连续两天没有新日志才符合「最近怎么没数据了」的直觉。
+ */
+const STALE_HINT_DAYS = 2;
 
 const SOURCE_KEYS: SourceKey[] = [
   "workbuddy",
@@ -173,6 +181,8 @@ export default function TokenStatsPage() {
   }, [accounts.length, fetchAccounts]);
 
   const source = stats?.sources.find((item) => item.source === active);
+  /** 最后一条日志距今几天（`null` = 无覆盖信息）：达到 `STALE_HINT_DAYS` 才在页头提示。 */
+  const logStaleDays = staleLogDays(source?.coverageEndAt);
   const options = useMemo(
     () => accountOptions(active, accounts, source?.accounts),
     [active, accounts, source],
@@ -279,6 +289,15 @@ export default function TokenStatsPage() {
                 <p className="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
                   本地日志口径（不是官方账单）：覆盖 {formatDate(source.coverageStartAt)} ~{" "}
                   {formatDate(source.coverageEndAt)} · 账号：{scopeLabel} · 逐请求明细仅 CodeBuddy CLI 提供
+                </p>
+              ) : null}
+              {source && logStaleDays !== null && logStaleDays >= STALE_HINT_DAYS ? (
+                <p className="mt-1 flex max-w-2xl items-start gap-1.5 text-[11px] leading-5 text-muted-foreground">
+                  <Info className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-500" aria-hidden="true" />
+                  <span>
+                    最近一次日志是 {formatDate(source.coverageEndAt)}（{logStaleDays} 天前）。客户端升级后可能不再写本机日志，
+                    本页只能显示历史数据；近期消耗可切到「CodeBuddy CLI」来源，或看积分页的官方用量。
+                  </span>
                 </p>
               ) : null}
             </>

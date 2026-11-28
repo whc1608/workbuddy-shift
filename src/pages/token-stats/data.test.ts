@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { dateDaysAgo, dateKey } from "@/lib/format";
 import type { TokenStatsGroup, TokenStatsSource } from "@/lib/types";
 
-import { fillRangePoints, overviewTotals, rangePoints, rangeTotals } from "./data";
+import { fillRangePoints, overviewTotals, rangePoints, rangeTotals, staleLogDays } from "./data";
 
 const today = dateKey(new Date());
 const daysAgo = (days: number) => dateDaysAgo(days);
@@ -136,5 +136,26 @@ describe("token-stats overviewTotals", () => {
   it("按区间汇总时使用对应日期窗口", () => {
     expect(overviewTotals(source, "today")).toEqual(totals);
     expect(overviewTotals(source, "7d")).toEqual(totals);
+  });
+});
+
+describe("staleLogDays", () => {
+  // 用本地时间构造，和函数内部「按本地整日比较」一致（避免时区把断言变成偶发失败）。
+  const now = new Date(2026, 10, 28, 10, 0, 0).getTime();
+
+  it("今天有日志时不提示", () => {
+    expect(staleLogDays(new Date(2026, 10, 28, 8, 30).getTime(), now)).toBeNull();
+  });
+
+  it("按整日差算：昨天是 1 天，前天的 23:22 是 2 天", () => {
+    expect(staleLogDays(new Date(2026, 10, 27, 23, 30).getTime(), now)).toBe(1);
+    expect(staleLogDays(new Date(2026, 10, 26, 23, 22).getTime(), now)).toBe(2);
+  });
+
+  it("没有覆盖信息、非法值、将来时间都不提示", () => {
+    expect(staleLogDays(null, now)).toBeNull();
+    expect(staleLogDays(undefined, now)).toBeNull();
+    expect(staleLogDays(Number.NaN, now)).toBeNull();
+    expect(staleLogDays(now + 86_400_000, now)).toBeNull();
   });
 });

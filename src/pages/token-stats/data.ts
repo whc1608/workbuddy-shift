@@ -258,3 +258,27 @@ export function heatmapActiveDays(groups: TokenStatsGroup[], today = new Date())
     (group) => group.key >= startKey && group.key <= todayKey && tokenTotal(group) > 0,
   ).length;
 }
+
+/**
+ * 某个来源「最后一条日志距今几天」（按整日差，不是 24 小时差）。
+ *
+ * Token 统计只吃**本机日志**：客户端升级后如果不再写日志，趋势图就会凭空少掉最近
+ * 几天的柱子，看起来像统计坏了。实测 CodeBuddy IDE 在 2026-11-27 夜里升级后就不再
+ * 更新 `history/<id>/index.json`，而页面此前没有任何提示。
+ *
+ * 返回 `null` = 没有覆盖信息（旧后端）、无法解析，或最后一条落在将来（时钟偏差）；
+ * 这三种情况都不该提示，由调用方决定从第几天开始提醒。
+ */
+export function staleLogDays(
+  coverageEndAt: number | null | undefined,
+  now: number = Date.now(),
+): number | null {
+  if (!coverageEndAt) return null;
+  const end = new Date(coverageEndAt);
+  if (Number.isNaN(end.getTime())) return null;
+  const today = new Date(now);
+  const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  const todayDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const days = Math.round((todayDay - endDay) / 86_400_000);
+  return days > 0 ? days : null;
+}
